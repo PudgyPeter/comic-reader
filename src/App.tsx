@@ -1,51 +1,76 @@
-import { useState } from "react";
-import reactLogo from "./assets/react.svg";
-import { invoke } from "@tauri-apps/api/core";
-import "./App.css";
+import { Suspense, lazy, useEffect } from "react";
+import { Navigate, Route, Routes } from "react-router-dom";
+import { AppShell } from "./components/AppShell";
+import { Spinner } from "./components/ui";
+import { useSettings } from "./store/settings";
 
-function App() {
-  const [greetMsg, setGreetMsg] = useState("");
-  const [name, setName] = useState("");
+const LibraryPage = lazy(() => import("./pages/LibraryPage"));
+const SeriesPage = lazy(() => import("./pages/SeriesPage"));
+const SeriesDetailPage = lazy(() => import("./pages/SeriesDetailPage"));
+const ReaderPage = lazy(() => import("./pages/ReaderPage"));
+const CollectionsPage = lazy(() => import("./pages/CollectionsPage"));
+const CollectionDetailPage = lazy(() => import("./pages/CollectionDetailPage"));
+const OrdersPage = lazy(() => import("./pages/OrdersPage"));
+const OrderDetailPage = lazy(() => import("./pages/OrderDetailPage"));
+const SearchPage = lazy(() => import("./pages/SearchPage"));
+const StatsPage = lazy(() => import("./pages/StatsPage"));
+const HistoryPage = lazy(() => import("./pages/HistoryPage"));
+const SettingsPage = lazy(() => import("./pages/SettingsPage"));
 
-  async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    setGreetMsg(await invoke("greet", { name }));
+function Themed() {
+  const settings = useSettings((state) => state.settings);
+  useEffect(() => {
+    document.documentElement.dataset.theme = settings.theme;
+    document.documentElement.style.setProperty("--accent", settings.accent);
+    document.documentElement.dataset.density = settings.density;
+  }, [settings.theme, settings.accent, settings.density]);
+  return null;
+}
+
+export default function App() {
+  const load = useSettings((state) => state.load);
+  const loaded = useSettings((state) => state.loaded);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  if (!loaded) {
+    return (
+      <div className="grid h-full place-items-center">
+        <Spinner className="size-6" />
+      </div>
+    );
   }
 
   return (
-    <main className="container">
-      <h1>Welcome to Tauri + React</h1>
-
-      <div className="row">
-        <a href="https://vite.dev" target="_blank">
-          <img src="/vite.svg" className="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img src="/tauri.svg" className="logo tauri" alt="Tauri logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
-      </div>
-      <p>Click on the Tauri, Vite, and React logos to learn more.</p>
-
-      <form
-        className="row"
-        onSubmit={(e) => {
-          e.preventDefault();
-          greet();
-        }}
+    <>
+      <Themed />
+      <Suspense
+        fallback={
+          <div className="grid h-full place-items-center">
+            <Spinner className="size-6" />
+          </div>
+        }
       >
-        <input
-          id="greet-input"
-          onChange={(e) => setName(e.currentTarget.value)}
-          placeholder="Enter a name..."
-        />
-        <button type="submit">Greet</button>
-      </form>
-      <p>{greetMsg}</p>
-    </main>
+        <Routes>
+          <Route path="reader/:issueId" element={<ReaderPage />} />
+          <Route element={<AppShell />}>
+            <Route index element={<LibraryPage />} />
+            <Route path="series" element={<SeriesPage />} />
+            <Route path="series/:seriesId" element={<SeriesDetailPage />} />
+            <Route path="collections" element={<CollectionsPage />} />
+            <Route path="collections/:collectionId" element={<CollectionDetailPage />} />
+            <Route path="orders" element={<OrdersPage />} />
+            <Route path="orders/:orderId" element={<OrderDetailPage />} />
+            <Route path="search" element={<SearchPage />} />
+            <Route path="stats" element={<StatsPage />} />
+            <Route path="history" element={<HistoryPage />} />
+            <Route path="settings" element={<SettingsPage />} />
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Route>
+        </Routes>
+      </Suspense>
+    </>
   );
 }
-
-export default App;

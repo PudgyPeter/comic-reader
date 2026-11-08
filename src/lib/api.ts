@@ -1,0 +1,176 @@
+import { invoke } from "@tauri-apps/api/core";
+import type {
+  Bookmark,
+  Collection,
+  CollectionDetail,
+  ImportResult,
+  HistoryPayload,
+  IssueCard,
+  IssuePatch,
+  LibraryFilter,
+  LibraryRoot,
+  LibrarySnapshot,
+  NextIssue,
+  OrderItem,
+  ReaderPayload,
+  ReadingOrder,
+  ReadingOrderDetail,
+  SavedSearch,
+  SearchResult,
+  SearchSuggestion,
+  SeriesDetail,
+  SeriesPatch,
+  Settings,
+  Stats,
+} from "./types";
+
+interface CommandError {
+  kind?: string;
+  message?: string;
+}
+
+function normalizeError(error: unknown): Error {
+  if (error instanceof Error) return error;
+  if (error && typeof error === "object") {
+    const payload = error as CommandError;
+    if (payload.message) {
+      const wrapped = new Error(payload.message);
+      wrapped.name = payload.kind ?? "error";
+      return wrapped;
+    }
+  }
+  return new Error(String(error));
+}
+
+function command<T>(name: string, args?: Record<string, unknown>): Promise<T> {
+  return invoke<T>(name, args).catch((error) => {
+    throw normalizeError(error);
+  });
+}
+
+export const api = {
+  addLibraryRoot: (path: string) => command<ImportResult>("add_library_root", { path }),
+  rescanLibrary: () => command<ImportResult[]>("rescan_library"),
+  cancelImport: () => command<boolean>("cancel_import"),
+  removeLibraryRoot: (rootId: string) => command<void>("remove_library_root", { rootId }),
+  libraryRoots: () => command<LibraryRoot[]>("library_roots"),
+  library: (filter: LibraryFilter) => command<LibrarySnapshot>("library", { filter }),
+  filterOptions: () =>
+    command<{ universes: string[]; publishers: string[] }>("filter_options"),
+  seriesDetail: (seriesId: string) => command<SeriesDetail>("series_detail", { seriesId }),
+  createSeries: (title: string, publisher?: string, universe?: string) =>
+    command<SeriesDetail>("create_series", { title, publisher, universe }),
+  updateSeries: (seriesId: string, patch: SeriesPatch) =>
+    command<SeriesDetail>("update_series", { seriesId, patch }),
+  deleteSeries: (seriesId: string) => command<void>("delete_series", { seriesId }),
+  issueDetail: (issueId: string) => command<IssueCard>("issue_detail", { issueId }),
+  updateIssue: (issueId: string, patch: IssuePatch) =>
+    command<IssueCard>("update_issue", { issueId, patch }),
+  bulkUpdateIssues: (issueIds: string[], patch: IssuePatch) =>
+    command<IssueCard[]>("bulk_update_issues", { issueIds, patch }),
+  deleteIssue: (issueId: string) => command<void>("delete_issue", { issueId }),
+  readerPayload: (issueId: string) => command<ReaderPayload>("reader_payload", { issueId }),
+  setSpreadOffset: (issueId: string, offset: number) =>
+    command<number>("set_spread_offset", { issueId, offset }),
+  setDirectionOverride: (issueId: string, direction: "ltr" | "rtl" | null) =>
+    command<"ltr" | "rtl" | null>("set_direction_override", { issueId, direction }),
+  setMissingReason: (seriesId: string, number: string, reason: "missing" | "not-required" | null) =>
+    command<void>("set_missing_reason", { seriesId, number, reason }),
+  saveProgress: (issueId: string, page: number, completionThreshold?: number) =>
+    command<{ page: number; total: number; status: string }>("save_progress", {
+      issueId,
+      page,
+      completionThreshold,
+    }),
+  setIssueStatus: (issueId: string, status: string) =>
+    command<IssueCard>("set_issue_status", { issueId, status }),
+  recordReadingSession: (issueId: string, pages: number, seconds: number) =>
+    command<void>("record_reading_session", { issueId, pages, seconds }),
+  search: (query: string, limit?: number) =>
+    command<SearchResult>("search_library", { query, limit }),
+  searchSuggestions: (query: string) =>
+    command<SearchSuggestion[]>("search_suggestions", { query }),
+  savedSearches: () => command<SavedSearch[]>("saved_searches"),
+  saveSearch: (name: string, query: string) =>
+    command<SavedSearch>("save_search", { name, query }),
+  deleteSavedSearch: (id: string) => command<void>("delete_saved_search", { id }),
+  readingOrders: () => command<ReadingOrder[]>("reading_orders"),
+  readingOrder: (orderId: string) => command<ReadingOrderDetail>("reading_order", { orderId }),
+  createReadingOrder: (name: string, description?: string, kind?: string) =>
+    command<ReadingOrder>("create_reading_order", { name, description, kind }),
+  generatePublicationOrder: (name: string) =>
+    command<ReadingOrderDetail>("generate_publication_order", { name }),
+  deleteReadingOrder: (orderId: string) => command<void>("delete_reading_order", { orderId }),
+  addOrderItems: (orderId: string, issueIds: string[]) =>
+    command<void>("add_order_items", { orderId, issueIds }),
+  reorderItems: (orderId: string, issueIds: string[]) =>
+    command<void>("reorder_items", { orderId, issueIds }),
+  nextInOrder: (orderId: string, issueId: string) =>
+    command<NextIssue | null>("next_in_order", { orderId, issueId }),
+  collections: () => command<Collection[]>("collections"),
+  collection: (collectionId: string) =>
+    command<CollectionDetail>("collection", { collectionId }),
+  createCollection: (name: string, description?: string) =>
+    command<Collection>("create_collection", { name, description }),
+  updateCollection: (
+    collectionId: string,
+    name?: string,
+    description?: string,
+    coverFileId?: string,
+  ) => command<Collection>("update_collection", { collectionId, name, description, coverFileId }),
+  deleteCollection: (collectionId: string) =>
+    command<void>("delete_collection", { collectionId }),
+  addToCollection: (collectionId: string, issueIds: string[]) =>
+    command<void>("add_to_collection", { collectionId, issueIds }),
+  addSeriesToCollection: (collectionId: string, seriesId: string) =>
+    command<void>("add_series_to_collection", { collectionId, seriesId }),
+  removeFromCollection: (collectionId: string, issueIds: string[]) =>
+    command<void>("remove_from_collection", { collectionId, issueIds }),
+  reorderCollection: (collectionId: string, issueIds: string[]) =>
+    command<void>("reorder_collection", { collectionId, issueIds }),
+  getSettings: () => command<Settings>("get_settings"),
+  saveSettings: (settings: Settings) => command<Settings>("save_settings", { settings }),
+  bookmarks: (issueId: string) => command<Bookmark[]>("bookmarks", { issueId }),
+  addBookmark: (issueId: string, page: number, label?: string, note?: string) =>
+    command<Bookmark>("add_bookmark", { issueId, page, label, note }),
+  deleteBookmark: (id: string) => command<void>("delete_bookmark", { id }),
+  updateBookmarkNote: (id: string, note: string | null) =>
+    command<Bookmark>("update_bookmark_note", { id, note }),
+  revealSpoiler: (issueId: string) => command<void>("reveal_spoiler", { issueId }),
+  stats: () => command<Stats>("stats"),
+  readingHistory: (limit?: number) => command<HistoryPayload>("reading_history", { limit }),
+  exportLibrary: () => command<Record<string, unknown>>("export_library"),
+  exportLibraryTo: (path: string) => command<void>("export_library_to", { path }),
+};
+
+export type OrderItemPayload = OrderItem;
+
+const isWindowsHost =
+  typeof navigator !== "undefined" && /windows/i.test(navigator.userAgent);
+
+export const assetOrigin = isWindowsHost ? "http://comic.localhost" : "comic://localhost";
+
+export const MOCK_MODE =
+  import.meta.env.DEV &&
+  typeof window !== "undefined" &&
+  new URLSearchParams(window.location.search).has("mock");
+
+let mockResolver: ((url: string) => string) | null = null;
+
+export function setMockResolver(resolver: ((url: string) => string) | null) {
+  mockResolver = resolver;
+}
+
+function resolve(url: string): string {
+  if (MOCK_MODE && mockResolver) return mockResolver(url);
+  return url;
+}
+
+export function coverUrl(fileId: string | null, page = 0, width = 320) {
+  if (!fileId) return null;
+  return resolve(`${assetOrigin}/cover/${fileId}/${page}/${width}`);
+}
+
+export function pageUrl(fileId: string, page: number) {
+  return resolve(`${assetOrigin}/page/${fileId}/${page}`);
+}
