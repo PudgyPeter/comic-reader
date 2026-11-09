@@ -1,6 +1,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use comic_reader_lib::archive;
 use comic_reader_lib::db::Database;
 use comic_reader_lib::library;
 use comic_reader_lib::models::{IssuePatch, LibraryFilter, Settings};
@@ -2404,4 +2405,80 @@ fn unmatched_files_stay_readable_and_match_without_losing_progress() {
     assert_eq!(matched.series_title.as_deref(), Some("Annuals"));
     assert!(db.with(|conn| repo::unmatched_files(conn)).unwrap().is_empty());
     assert!(db.with(|conn| repo::fileless_issues(conn)).unwrap().is_empty());
+}
+
+#[test]
+fn single_archive_file_can_be_imported_as_its_own_root() {
+    // Very large omnibus CBZ files are added directly instead of through a
+    // folder, so the root may be the archive itself.
+    let (dir, db) = setup("single-file-root");
+    let archive = dir.join("Sonic Collection.cbz");
+    write_cbz_with_info(&archive, 5, "Sonic the Hedgehog", "1-5", "Collection");
+
+    let preview = db.with(|conn| library::preview_import(conn, &archive, &library::ImportControl::new()))
+        .unwrap();
+    assert_eq!(preview.len(), 1);
+    assert_eq!(preview[0].relative_path, "Sonic Collection.cbz");
+    assert_eq!(preview[0].page_count, 5);
+
+    let result = db
+        .with(|conn| library::import_root(conn, &archive))
+        .unwrap();
+    assert_eq!(result.files_imported, 1);
+    assert_eq!(result.issues_created, 1);
+    assert_eq!(result.root.path, library::to_stored_path(&library::normalize_root(&archive).unwrap()));
+
+    // The page index is stored without retaining page bytes in memory.
+    let snapshot = db
+        .with(|conn| {
+            repo::library_snapshot(
+                conn,
+                &LibraryFilter {
+                    search: String::new(),
+                    universe: None,
+                    publisher: None,
+                    series_id: None,
+                    status: None,
+                    sort: "number".into(),
+                    descending: false,
+                },
+            )
+        })
+        .unwrap();
+    let issue = &snapshot.issues[0];
+    assert_eq!(issue.page_count, 5);
+    let reader = db.with(|conn| repo::reader_payload(conn, &issue.id)).unwrap();
+    assert_eq!(reader.pages.len(), 5);
+    assert!(reader.pages.iter().all(|page| page.width > 0 && page.height > 0));
+
+    // Pages are still served on demand even though import never buffered them.
+    let file_id = issue.file_id.clone().unwrap();
+    let (bytes, mime) = db.with(|conn| repo::page_bytes(conn, &file_id, 2)).unwrap();
+    assert_eq!(mime, "image/png");
+    assert_eq!(
+        archive::dimensions(&bytes),
+        Some((reader.pages[2].width, reader.pages[2].height))
+    );
+}
+
+#[test]
+fn non_archive_file_is_rejected_as_a_root() {
+    let (dir, db) = setup("bad-root");
+    let path = dir.join("notes.txt");
+    std::fs::write(&path, "not a comic").unwrap();
+    let result = db.with(|conn| library::preview_import(conn, &path, &library::ImportControl::new()));
+    assert!(result.is_err());
+}
+
+#[test]
+fn rescan_keeps_a_single_file_root_working() {
+    let (dir, db) = setup("single-file-rescan");
+    let archive = dir.join("Omnibus.cbz");
+    write_cbz(&archive, 3, false);
+    db.with(|conn| library::import_root(conn, &archive)).unwrap();
+    let results = db.with(library::rescan).unwrap();
+    assert_eq!(results.len(), 1);
+    // Second pass sees the same relative path and skips instead of duplicating.
+    assert_eq!(results[0].files_imported, 0);
+    assert_eq!(results[0].files_skipped, 1);
 }

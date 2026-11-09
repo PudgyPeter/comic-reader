@@ -5,7 +5,7 @@ is the spec; this file is only state.
 
 ## Verified green
 
-- `cd src-tauri && cargo test` -> 37 passed (`tests/core.rs`)
+- `cd src-tauri && cargo test` -> 40 passed (`tests/core.rs`)
 - Test library generator: `cargo run --example sonic_fixture -- <library-dir> <db-dir>`
   writes 26 synthetic CBZ issues (gaps at 7/12/15, one annual, one Cover B variant,
   a companion run with one gap), imports them, and seeds progress, a bookmark,
@@ -106,6 +106,23 @@ series and duplicate numbering.
   collection filter.
 - **Caveat:** there is no SQL-level guard preventing a manual `collection_items` insert for a
   smart collection; only the repo/UI paths enforce it.
+
+## Large single-file archives (omnibus CBZ/CBR/PDF)
+
+- A library root may now be **one archive file**, not just a folder
+  (`library::normalize_root`). This is the path for very large collections, e.g. a
+  1.6 GB CBZ holding the whole Sonic run. `scan_candidate_paths` returns the file itself,
+  and `relative_to_root` uses its file name as the relative path.
+- UI: the sidebar has "Add folder" **and "Add files"** (multi-select, CBZ/ZIP/CBR/PDF).
+  `ImportReview` now takes a list of sources, previews each, and commits them one by one,
+  merging the results — so a folder and a huge file can be reviewed in one pass.
+- Import no longer holds every page in RAM. `archive::read_*` became `archive::scan_*` and
+  returns `PageMeta { name, width, height }`: ZIP and folder pages are probed from a 64 KiB
+  prefix, RAR uses a `PrefixWriter` that keeps only the prefix. Page bytes are read on demand
+  through the existing `archive::page_bytes` path (already used by `comic://`), so memory use
+  is flat regardless of archive size. PDFs are still fully decoded to discover page order.
+- Tests: `single_archive_file_can_be_imported_as_its_own_root`,
+  `non_archive_file_is_rejected_as_a_root`, `rescan_keeps_a_single_file_root_working`.
 
 ## Unmatched files + match to issue (CORE-7) — schema v9
 
@@ -283,6 +300,10 @@ compositing bug (same bytes render fine in Chrome), not an app defect.
   `file_progress`/`file_bookmarks`; only `repo::adopt_file_progress` may move them, and it must
   stay inside the match transaction. Anything that creates an issue for a file must reuse the
   existing `file_id`, never re-import.
+- `archive::scan_*` returns metadata only. Never reintroduce a variant that buffers every page;
+  it is what kept multi-GB archives from importing. `page_bytes` is the only page-data entry.
+- A root may be a single archive file. Any code that does `strip_prefix(root)` or walks the root
+  must handle `root.is_file()` (use `library::relative_to_root`).
 - `SCHEMA_VERSION` is 9; migration tests must drop `file_progress`/`file_bookmarks` when
   simulating pre-v9 databases, and the v4 migration test already does.
 

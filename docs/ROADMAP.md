@@ -89,6 +89,7 @@ Do not build a reader screen before F2/F4 exist, or you will rewrite it.
 Deliverables:
 
 - Add/remove library roots through a native folder picker; paths stay in Rust.
+  **A root may be a single large archive file too (multi-GB omnibus CBZ/CBR/PDF).**
 - Recursive scan with progress, cancellation, and resume.
 - File records with format, size, page count, and status; unmatched files visible.
   **Unmatched files have a dedicated view + file reader (schema v9).**

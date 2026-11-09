@@ -5,16 +5,64 @@ use serde::Serialize;
 
 use crate::error::{AppError, AppResult};
 
+/// Page metadata discovered while indexing an archive. Page bytes are *not*
+/// retained: large single-file archives (multi-GB omnibus CBZs) are read one
+/// page at a time on demand through `page_bytes`, so import memory stays flat.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ArchiveEntry {
+pub struct PageMeta {
     pub name: String,
     pub width: u32,
     pub height: u32,
-    pub data: Vec<u8>,
 }
 
 pub const MAX_ENTRY_BYTES: u64 = 128 * 1024 * 1024;
+
+/// How many leading bytes of an image are enough to read its dimensions.
+/// Format headers (PNG/JPEG/GIF/WebP/AVIF) live well inside this, so indexing a
+/// large archive never has to decompress every full page.
+const DIMENSION_PROBE_BYTES: u64 = 256 * 1024;
+
+/// Keeps only the first `limit` bytes of a stream and silently discards the
+/// rest, so dimension probing never retains a whole page.
+struct PrefixWriter {
+    limit: usize,
+    buffer: Vec<u8>,
+}
+
+impl PrefixWriter {
+    fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            buffer: Vec::new(),
+        }
+    }
+
+    fn into_bytes(self) -> Vec<u8> {
+        self.buffer
+    }
+}
+
+impl std::io::Write for PrefixWriter {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        let room = self.limit.saturating_sub(self.buffer.len());
+        if room > 0 {
+            self.buffer.extend_from_slice(&data[..data.len().min(room)]);
+        }
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Reads only enough of an entry to learn its dimensions, then discards it.
+fn probe_dimensions<R: Read>(reader: R, limit: u64) -> Option<(u32, u32)> {
+    let mut head = Vec::with_capacity(limit as usize);
+    reader.take(limit).read_to_end(&mut head).ok()?;
+    dimensions(&head)
+}
 
 pub fn is_image_path(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
@@ -64,7 +112,7 @@ pub enum NaturalPart {
     Number(u64),
 }
 
-pub fn read_archive(path: &std::path::Path) -> AppResult<Vec<ArchiveEntry>> {
+pub fn scan_archive(path: &std::path::Path) -> AppResult<Vec<PageMeta>> {
     let file = std::fs::File::open(path)?;
     let reader = std::io::BufReader::new(file);
     let mut archive = zip::ZipArchive::new(reader)?;
@@ -98,14 +146,11 @@ pub fn read_archive(path: &std::path::Path) -> AppResult<Vec<ArchiveEntry>> {
     let mut out = Vec::with_capacity(names.len());
     for (name, index) in names {
         let mut entry = archive.by_index(index)?;
-        let mut data = Vec::with_capacity(entry.size() as usize);
-        entry.by_ref().take(MAX_ENTRY_BYTES).read_to_end(&mut data)?;
-        let (width, height) = dimensions(&data).unwrap_or((0, 0));
-        out.push(ArchiveEntry {
+        let (width, height) = probe_dimensions(&mut entry, DIMENSION_PROBE_BYTES).unwrap_or((0, 0));
+        out.push(PageMeta {
             name,
             width,
             height,
-            data,
         });
     }
     if out.is_empty() {
@@ -118,22 +163,23 @@ pub fn read_archive(path: &std::path::Path) -> AppResult<Vec<ArchiveEntry>> {
 }
 
 /// PDF pages are converted into the same in-memory page shape as archives.
-pub fn read_pdf_entries(path: &std::path::Path) -> AppResult<Vec<ArchiveEntry>> {
+/// PDFs are still fully decoded to discover page order/dimensions; image-page
+/// comics are small enough that this stays within the import budget.
+pub fn scan_pdf(path: &std::path::Path) -> AppResult<Vec<PageMeta>> {
     let pages = crate::pdf::read_pdf(path)?;
     let mut out = Vec::with_capacity(pages.len());
     for page in pages {
         let (width, height) = dimensions(&page.data).unwrap_or((page.width, page.height));
-        out.push(ArchiveEntry {
+        out.push(PageMeta {
             name: format!("page-{:04}.{}", page.index + 1, page.extension),
             width,
             height,
-            data: page.data,
         });
     }
     Ok(out)
 }
 
-pub fn read_rar(path: &std::path::Path) -> AppResult<Vec<ArchiveEntry>> {
+pub fn scan_rar(path: &std::path::Path) -> AppResult<Vec<PageMeta>> {
     let file = std::fs::File::open(path)?;
     let mut archive = unrar_rs::RarArchive::open(std::io::BufReader::new(file))
         .map_err(|err| AppError::Archive(format!("cannot open rar: {err}")))?;
@@ -168,19 +214,15 @@ pub fn read_rar(path: &std::path::Path) -> AppResult<Vec<ArchiveEntry>> {
         let entry = archive
             .by_index(index)
             .map_err(|err| AppError::Archive(format!("cannot read rar member: {err}")))?;
-        let mut data = Vec::new();
+        let mut head = PrefixWriter::new(DIMENSION_PROBE_BYTES as usize);
         entry
-            .copy_to(&mut data)
-            .map_err(|err| AppError::Archive(format!("cannot extract rar member: {err}")))?;
-        if data.len() as u64 > MAX_ENTRY_BYTES {
-            continue;
-        }
-        let (width, height) = dimensions(&data).unwrap_or((0, 0));
-        out.push(ArchiveEntry {
+            .copy_to(&mut head)
+            .map_err(|err| AppError::Archive(format!("cannot read rar member: {err}")))?;
+        let (width, height) = dimensions(&head.into_bytes()).unwrap_or((0, 0));
+        out.push(PageMeta {
             name,
             width,
             height,
-            data,
         });
     }
     if out.is_empty() {
@@ -192,7 +234,7 @@ pub fn read_rar(path: &std::path::Path) -> AppResult<Vec<ArchiveEntry>> {
     Ok(out)
 }
 
-pub fn read_folder(path: &std::path::Path) -> AppResult<Vec<ArchiveEntry>> {
+pub fn scan_folder(path: &std::path::Path) -> AppResult<Vec<PageMeta>> {
     let mut files = Vec::new();
     for entry in std::fs::read_dir(path)? {
         let entry = entry?;
@@ -214,13 +256,14 @@ pub fn read_folder(path: &std::path::Path) -> AppResult<Vec<ArchiveEntry>> {
         if size > MAX_ENTRY_BYTES {
             continue;
         }
-        let data = std::fs::read(&path)?;
-        let (width, height) = dimensions(&data).unwrap_or((0, 0));
-        out.push(ArchiveEntry {
+        let (width, height) = std::fs::File::open(&path)
+            .ok()
+            .and_then(|file| probe_dimensions(file, DIMENSION_PROBE_BYTES))
+            .unwrap_or((0, 0));
+        out.push(PageMeta {
             name,
             width,
             height,
-            data,
         });
     }
     if out.is_empty() {

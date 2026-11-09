@@ -7,7 +7,11 @@ import { Icon } from "./Icon";
 import { useToast } from "./Toast";
 import { useImportActivity } from "../store/importActivity";
 
-type Editable = ImportCandidate & { edited: boolean; keepUnmatched: boolean };
+type Editable = ImportCandidate & {
+  edited: boolean;
+  keepUnmatched: boolean;
+  sourcePath: string;
+};
 
 const FIELDS: { key: keyof ImportCandidate; label: string; className?: string }[] = [
   { key: "seriesTitle", label: "Series", className: "sm:col-span-2" },
@@ -39,14 +43,23 @@ function toOverride(candidate: Editable): ImportOverride | null {
   };
 }
 
+function mergeResults(a: ImportResult, b: ImportResult): ImportResult {
+  return {
+    root: a.root,
+    filesImported: a.filesImported + b.filesImported,
+    filesSkipped: a.filesSkipped + b.filesSkipped,
+    seriesCreated: a.seriesCreated + b.seriesCreated,
+    issuesCreated: a.issuesCreated + b.issuesCreated,
+    warnings: [...a.warnings, ...b.warnings],
+  };
+}
+
 export function ImportReview({
-  path,
-  candidates,
+  sources,
   onClose,
   onImported,
 }: {
-  path: string;
-  candidates: ImportCandidate[];
+  sources: { path: string; candidates: ImportCandidate[] }[];
   onClose: () => void;
   onImported: (result: ImportResult) => void;
 }) {
@@ -55,7 +68,14 @@ export function ImportReview({
   const endActivity = useImportActivity((state) => state.end);
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [rows, setRows] = useState<Editable[]>(() =>
-    candidates.map((candidate) => ({ ...candidate, edited: false, keepUnmatched: false })),
+    sources.flatMap((source) =>
+      source.candidates.map((candidate) => ({
+        ...candidate,
+        edited: false,
+        keepUnmatched: false,
+        sourcePath: source.path,
+      })),
+    ),
   );
   const [busy, setBusy] = useState(false);
 
@@ -82,10 +102,21 @@ export function ImportReview({
     setBusy(true);
     beginActivity("Importing reviewed files");
     try {
-      const overrides = rows
-        .map(toOverride)
-        .filter((override): override is ImportOverride => override !== null);
-      const result = await api.commitImport(path, overrides);
+      // Rows are grouped by the root they were previewed from (a folder, or a
+      // single archive file), so each commit gets only its own overrides.
+      let result: ImportResult | null = null;
+      for (const source of sources) {
+        const overrides = rows
+          .filter((row) => row.sourcePath === source.path)
+          .map(toOverride)
+          .filter((override): override is ImportOverride => override !== null);
+        const partial = await api.commitImport(source.path, overrides);
+        result = result ? mergeResults(result, partial) : partial;
+      }
+      if (!result) {
+        onClose();
+        return;
+      }
       toast.push(
         `Imported ${pluralize(result.filesImported, "file")} · ${pluralize(
           result.issuesCreated,

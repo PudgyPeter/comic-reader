@@ -142,9 +142,9 @@ export function AppShell() {
   const toast = useToast();
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [progress, setProgress] = useState<ImportProgress | null>(null);
-  const [review, setReview] = useState<{ path: string; candidates: ImportCandidate[] } | null>(
-    null,
-  );
+  const [review, setReview] = useState<
+    { path: string; candidates: ImportCandidate[] }[] | null
+  >(null);
   const importing = useImportActivity((state) => state.active);
   const beginActivity = useImportActivity((state) => state.start);
   const endActivity = useImportActivity((state) => state.end);
@@ -183,7 +183,7 @@ export function AppShell() {
     if (!new URLSearchParams(window.location.search).has("import")) return;
     void api
       .previewImport("/mock/library")
-      .then((candidates) => setReview({ path: "/mock/library", candidates }))
+      .then((candidates) => setReview([{ path: "/mock/library", candidates }]))
       .catch(() => undefined);
   }, []);
 
@@ -209,6 +209,41 @@ export function AppShell() {
     toast.push("Cancelling import…", "info");
   };
 
+  // Shared preview flow for folders and individual archive files. Multiple
+  // sources are reviewed together so a folder and a huge single-file CBZ can be
+  // added in one pass.
+  const previewSources = async (selection: string[], label: string) => {
+    beginActivity(label);
+    setProgress(null);
+    try {
+      const sources: { path: string; candidates: ImportCandidate[] }[] = [];
+      for (const path of selection) {
+        const candidates = await api.previewImport(path).catch((error) => {
+          toast.push(String(error), "error");
+          return [] as ImportCandidate[];
+        });
+        if (candidates.length > 0) sources.push({ path, candidates });
+      }
+      if (sources.length === 0) {
+        toast.push("Nothing new to import in that selection", "info");
+        return;
+      }
+      setReview(sources);
+    } catch (error) {
+      if (
+        (error instanceof Error && error.name === "cancelled") ||
+        String(error).toLowerCase().includes("cancel")
+      ) {
+        toast.push("Import cancelled", "info");
+      } else {
+        toast.push(String(error), "error");
+      }
+    } finally {
+      endActivity();
+      setProgress(null);
+    }
+  };
+
   const addFolder = async () => {
     let selection: string | string[] | null;
     if (MOCK_MODE) {
@@ -223,28 +258,28 @@ export function AppShell() {
       });
     }
     if (!selection || Array.isArray(selection)) return;
-    beginActivity("Scanning folder");
-    setProgress(null);
-    try {
-      const candidates = await api.previewImport(selection);
-      if (candidates.length === 0) {
-        toast.push("Nothing new to import in that folder", "info");
-        return;
-      }
-      setReview({ path: selection, candidates });
-    } catch (error) {
-      if (
-        (error instanceof Error && error.name === "cancelled") ||
-        String(error).toLowerCase().includes("cancel")
-      ) {
-        toast.push("Import cancelled", "info");
-      } else {
-        toast.push(String(error), "error");
-      }
-    } finally {
-      endActivity();
-      setProgress(null);
+    await previewSources([selection], "Scanning folder");
+  };
+
+  const addFiles = async () => {
+    let selection: string | string[] | null;
+    if (MOCK_MODE) {
+      selection = "/mock/library/Sonic 001.cbz";
+    } else {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      selection = await open({
+        directory: false,
+        multiple: true,
+        title: "Add comic files",
+        filters: [
+          { name: "Comics", extensions: ["cbz", "zip", "cbr", "pdf"] },
+        ],
+      });
     }
+    if (!selection) return;
+    const paths = Array.isArray(selection) ? selection : [selection];
+    if (paths.length === 0) return;
+    await previewSources(paths, "Scanning files");
   };
 
   return (
@@ -348,6 +383,17 @@ export function AppShell() {
             <Icon name="plus" className="size-4 shrink-0" />
             {!navCollapsed && <span>{importing ? "Importing…" : "Add folder"}</span>}
           </button>
+          <button
+            onClick={addFiles}
+            disabled={importing}
+            className={cx(
+              "flex w-full items-center gap-3 rounded-lg px-3 py-2 text-[13px] font-medium text-muted transition-colors hover:bg-[var(--surface-2)] hover:text-[var(--text-strong)]",
+            )}
+            title="Add comic files (CBZ, CBR, PDF)"
+          >
+            <Icon name="book" className="size-4 shrink-0" />
+            {!navCollapsed && <span>Add files</span>}
+          </button>
           <NavLink
             to="/settings"
             className={({ isActive }) =>
@@ -408,8 +454,7 @@ export function AppShell() {
 
       {review && (
         <ImportReview
-          path={review.path}
-          candidates={review.candidates}
+          sources={review}
           onClose={() => setReview(null)}
           onImported={() => {
             window.dispatchEvent(new Event("library:changed"));

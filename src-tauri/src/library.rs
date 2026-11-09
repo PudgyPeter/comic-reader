@@ -45,11 +45,20 @@ pub fn normalize_root(path: &Path) -> AppResult<PathBuf> {
     // adds, so paths stay readable and comparable with values produced by the
     // shell, the folder picker, and existing database rows.
     let canonical = dunce::canonicalize(path)
-        .map_err(|_| AppError::invalid(format!("cannot open folder: {}", path.display())))?;
-    if !canonical.is_dir() {
-        return Err(AppError::invalid("library root must be a folder"));
+        .map_err(|_| AppError::invalid(format!("cannot open path: {}", path.display())))?;
+    if canonical.is_dir() {
+        return Ok(canonical);
     }
-    Ok(canonical)
+    // A single archive can be added on its own, which is how very large
+    // omnibus CBZ/CBR/PDF files (multi-GB) enter the library.
+    if canonical.is_file() {
+        let name = canonical.file_name().map(|name| name.to_string_lossy().to_string());
+        if name.as_deref().is_some_and(is_archive_name) {
+            return Ok(canonical);
+        }
+        return Err(AppError::invalid("choose a folder or a CBZ/CBR/PDF file"));
+    }
+    Err(AppError::invalid("library root must be a folder or an archive file"))
 }
 
 /// Paths are stored with forward slashes so a library stays comparable across
@@ -148,6 +157,16 @@ pub struct ImportProgress {
 fn scan_candidate_paths(root: &Path) -> (Vec<PathBuf>, Vec<ImportWarning>) {
     let mut candidates: Vec<PathBuf> = Vec::new();
     let mut warnings: Vec<ImportWarning> = Vec::new();
+    if root.is_file() {
+        if root
+            .file_name()
+            .map(|name| is_archive_name(&name.to_string_lossy()))
+            .unwrap_or(false)
+        {
+            candidates.push(root.to_path_buf());
+        }
+        return (candidates, warnings);
+    }
     let walker = WalkDir::new(root).max_depth(6).follow_links(false);
     for entry in walker.into_iter().filter_map(|entry| entry.ok()) {
         if candidates.len() >= MAX_SCAN_FILES {
@@ -243,11 +262,7 @@ pub fn import_root_with_overrides(
             total,
             current: to_stored_path(&candidate),
         });
-        let relative = candidate
-            .strip_prefix(&root)
-            .unwrap_or(&candidate)
-            .to_string_lossy()
-            .to_string();
+        let relative = relative_to_root(&root, &candidate);
         if existing.iter().any(|stored| paths_equal(stored, &relative)) {
             files_skipped += 1;
             continue;
@@ -300,6 +315,24 @@ struct FileOutcome {
     warnings: Vec<ImportWarning>,
 }
 
+/// Path presented to the DB relative to the library root. When the root *is*
+/// the archive (single-file import) the file name is the relative path.
+fn relative_to_root(root: &Path, candidate: &Path) -> String {
+    let relative = if root.is_file() {
+        candidate
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_default()
+    } else {
+        candidate
+            .strip_prefix(root)
+            .unwrap_or(candidate)
+            .to_string_lossy()
+            .to_string()
+    };
+    relative.replace('\\', "/")
+}
+
 fn file_format(path: &Path) -> Option<&'static str> {
     let name = path.file_name().map(|name| name.to_string_lossy().to_string())?;
     let lower = name.to_ascii_lowercase();
@@ -316,12 +349,12 @@ fn file_format(path: &Path) -> Option<&'static str> {
     }
 }
 
-fn read_pages(path: &Path, format: &str) -> AppResult<Vec<archive::ArchiveEntry>> {
+fn scan_pages(path: &Path, format: &str) -> AppResult<Vec<archive::PageMeta>> {
     match format {
-        "folder" => archive::read_folder(path),
-        "cbr" => archive::read_rar(path),
-        "pdf" => archive::read_pdf_entries(path),
-        _ => archive::read_archive(path),
+        "folder" => archive::scan_folder(path),
+        "cbr" => archive::scan_rar(path),
+        "pdf" => archive::scan_pdf(path),
+        _ => archive::scan_archive(path),
     }
 }
 
@@ -359,15 +392,11 @@ pub fn preview_import(
         let Some(format) = file_format(&candidate) else {
             continue;
         };
-        let relative = candidate
-            .strip_prefix(&root)
-            .unwrap_or(&candidate)
-            .to_string_lossy()
-            .replace('\\', "/");
+        let relative = relative_to_root(&root, &candidate);
         if existing.iter().any(|stored| paths_equal(stored, &relative)) {
             continue;
         }
-        let pages = match read_pages(&candidate, format) {
+        let pages = match scan_pages(&candidate, format) {
             Ok(pages) if !pages.is_empty() => pages,
             Ok(_) => continue,
             Err(err) => {
@@ -543,7 +572,7 @@ fn import_file(
         return Ok(None);
     };
 
-    let pages = read_pages(path, format)?;
+    let pages = scan_pages(path, format)?;
     if pages.is_empty() {
         return Ok(None);
     }
