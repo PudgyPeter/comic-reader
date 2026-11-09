@@ -59,6 +59,8 @@ pub fn run() {
             commands::set_spread_offset,
             commands::set_direction_override,
             commands::set_issue_status,
+            commands::set_series_direction,
+            commands::set_series_status,
             commands::record_reading_session,
             commands::search_library,
             commands::search_suggestions,

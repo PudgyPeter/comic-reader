@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { Cover, EmptyState, ProgressBar, Spinner, StatusBadge } from "../components/ui";
 import { Icon } from "../components/Icon";
@@ -13,6 +13,8 @@ export default function SeriesDetailPage() {
   const { seriesId = "" } = useParams();
   const navigate = useNavigate();
   const toast = useToast();
+  const queryClient = useQueryClient();
+  const [bulkBusy, setBulkBusy] = useState(false);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<{
     title: string;
@@ -66,6 +68,23 @@ export default function SeriesDetailPage() {
   const setMissing = async (number: string, reason: "missing" | "not-required" | null) => {
     await api.setMissingReason(seriesId, number, reason);
     await query.refetch();
+  };
+
+  const applyToSeries = async (
+    run: () => Promise<number>,
+    success: (count: number) => string,
+  ) => {
+    setBulkBusy(true);
+    try {
+      const count = await run();
+      await query.refetch();
+      await queryClient.invalidateQueries({ queryKey: ["library"] });
+      toast.push(success(count), "success");
+    } catch (error) {
+      toast.push(String(error), "error");
+    } finally {
+      setBulkBusy(false);
+    }
   };
 
   const save = async () => {
@@ -130,6 +149,59 @@ export default function SeriesDetailPage() {
               <Icon name="edit" className="size-3.5" /> Edit series
             </button>
             <AddToCollectionMenu seriesId={seriesId} label="Add series to collection" />
+            <div className="flex overflow-hidden rounded-lg border border-[var(--line)]">
+              <button
+                className="btn btn-sm rounded-none border-0"
+                disabled={bulkBusy}
+                onClick={() =>
+                  applyToSeries(
+                    () => api.setSeriesStatus(seriesId, "completed"),
+                    (count) => `Marked ${pluralize(count, "issue")} read`,
+                  )
+                }
+                title="Mark every issue in this series read"
+              >
+                <Icon name="check" className="size-3.5" />
+                Mark all read
+              </button>
+              <button
+                className="btn btn-sm rounded-none border-0 border-l border-[var(--line)]"
+                disabled={bulkBusy}
+                onClick={() =>
+                  applyToSeries(
+                    () => api.setSeriesStatus(seriesId, "unread"),
+                    (count) => `Marked ${pluralize(count, "issue")} unread`,
+                  )
+                }
+                title="Mark every issue in this series unread"
+              >
+                Mark all unread
+              </button>
+            </div>
+            <select
+              className="input h-8 w-auto text-xs"
+              value=""
+              disabled={bulkBusy}
+              aria-label="Set reading direction for every issue in this series"
+              onChange={(event) => {
+                const value = event.currentTarget.value;
+                if (!value) return;
+                const direction = value === "default" ? null : (value as "ltr" | "rtl");
+                void applyToSeries(
+                  () => api.setSeriesDirection(seriesId, direction),
+                  (count) =>
+                    `Set ${pluralize(count, "file")} to ${
+                      direction === null ? "the series default" : direction.toUpperCase()
+                    }`,
+                );
+                event.currentTarget.value = "";
+              }}
+            >
+              <option value="">Direction for all issues…</option>
+              <option value="ltr">Left to right</option>
+              <option value="rtl">Right to left (manga)</option>
+              <option value="default">Clear per-file override</option>
+            </select>
           </div>
         </div>
       </div>

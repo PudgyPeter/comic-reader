@@ -4,6 +4,8 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import type { IssueCard, IssuePatch, LibraryFilter } from "../lib/types";
 import { cx, formatDate, formatRelative, pluralize, progressRatio } from "../lib/utils";
+import { useProgressiveList } from "../hooks/useProgressiveList";
+import { useImportActivity } from "../store/importActivity";
 import { Cover, EmptyState, Modal, ProgressBar, Spinner, StatusBadge } from "../components/ui";
 import { Icon } from "../components/Icon";
 import { useSettings } from "../store/settings";
@@ -31,6 +33,8 @@ export default function LibraryPage() {
   const settings = useSettings((state) => state.settings);
   const updateSettings = useSettings((state) => state.update);
   const toast = useToast();
+  const beginActivity = useImportActivity((state) => state.start);
+  const endActivity = useImportActivity((state) => state.end);
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("");
   const [universe, setUniverse] = useState("");
@@ -77,15 +81,21 @@ export default function LibraryPage() {
 
   const rescan = async () => {
     setRescanning(true);
+    beginActivity("Rescanning library");
     try {
       const results = await api.rescanLibrary();
       const imported = results.reduce((sum, entry) => sum + entry.filesImported, 0);
       toast.push(`Rescan complete · ${pluralize(imported, "new file")}`, "success");
       await snapshot.refetch();
     } catch (error) {
-      toast.push(String(error), "error");
+      if (error instanceof Error && error.name === "cancelled") {
+        toast.push("Rescan cancelled", "info");
+      } else {
+        toast.push(String(error), "error");
+      }
     } finally {
       setRescanning(false);
+      endActivity();
     }
   };
 
@@ -96,6 +106,11 @@ export default function LibraryPage() {
   };
 
   const empty = snapshot.isSuccess && issues.length === 0 && series.length === 0;
+
+  const { visible: visibleIssues, sentinelRef, hasMore } = useProgressiveList(
+    issues,
+    `${layout}|${search}|${status}|${universe}|${publisher}|${sort}`,
+  );
 
   return (
     <div className="mx-auto w-full max-w-[1500px] px-6 py-6">
@@ -358,7 +373,7 @@ export default function LibraryPage() {
 
       {!empty && layout === "grid" && (
         <div className="grid grid-cols-2 gap-x-4 gap-y-7 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
-          {issues.map((issue) => (
+          {visibleIssues.map((issue) => (
             <IssueTile
               key={issue.id}
               issue={issue}
@@ -368,6 +383,11 @@ export default function LibraryPage() {
               onEdit={() => setEditing(issue)}
             />
           ))}
+        </div>
+      )}
+      {!empty && layout === "grid" && hasMore && (
+        <div ref={sentinelRef} className="grid h-16 place-items-center">
+          <Spinner />
         </div>
       )}
 
@@ -386,7 +406,7 @@ export default function LibraryPage() {
               </tr>
             </thead>
             <tbody>
-              {issues.map((issue) => (
+              {visibleIssues.map((issue) => (
                 <tr key={issue.id} className="border-b border-[var(--line)] last:border-0 hover:bg-[var(--surface-1)]">
                   <td className="px-3 py-2">
                     <input
@@ -425,6 +445,11 @@ export default function LibraryPage() {
               ))}
             </tbody>
           </table>
+          {hasMore && (
+            <div ref={sentinelRef} className="grid h-14 place-items-center border-t border-[var(--line)]">
+              <Spinner />
+            </div>
+          )}
         </div>
       )}
 

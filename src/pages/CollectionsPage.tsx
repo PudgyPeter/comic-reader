@@ -67,17 +67,26 @@ export default function CollectionsPage() {
               to={`/collections/${collection.id}`}
               className="flex flex-1 gap-3 overflow-hidden"
             >
-              <div className="grid grid-cols-2 gap-0.5">
-                {[0, 1, 2, 3].map((slot) => (
+              <div className="grid shrink-0 grid-cols-2 gap-0.5">
+                {collection.coverFileId ? (
+                  [0, 1, 2, 3].map((slot) => (
+                    <Cover
+                      key={slot}
+                      fileId={collection.coverFileId}
+                      title={collection.name}
+                      className="h-14 w-10"
+                      width={80}
+                      rounded="rounded"
+                    />
+                  ))
+                ) : (
                   <Cover
-                    key={slot}
-                    fileId={collection.coverFileId}
+                    fileId={null}
                     title={collection.name}
-                    className="h-14 w-10"
-                    width={80}
+                    className="col-span-2 row-span-2 h-[7.125rem] w-[5.125rem]"
                     rounded="rounded"
                   />
-                ))}
+                )}
               </div>
               <div className="min-w-0 flex-1 py-0.5">
                 <p className="truncate text-sm font-medium">{collection.name}</p>

@@ -901,6 +901,128 @@ fn variants_link_to_a_base_issue_and_cannot_cycle() {
 }
 
 #[test]
+fn series_bulk_direction_and_status_apply_to_every_issue() {
+    let (dir, db) = setup("series-bulk");
+    let library_dir = dir.join("library");
+    std::fs::create_dir_all(&library_dir).unwrap();
+    for index in 1..=3 {
+        write_cbz_with_info(
+            &library_dir.join(format!("Sonic {index:03}.cbz")),
+            3,
+            "Sonic",
+            &index.to_string(),
+            &format!("Issue {index}"),
+        );
+    }
+    write_cbz_with_info(
+        &library_dir.join("Shadow 001.cbz"),
+        2,
+        "Shadow",
+        "1",
+        "Shadow 1",
+    );
+    db.with(|conn| library::import_root(conn, &library_dir)).unwrap();
+
+    let series = db.with(|conn| repo::series_summaries(conn)).unwrap();
+    let sonic = series.iter().find(|entry| entry.title == "Sonic").unwrap();
+
+    let touched = db
+        .with(|conn| repo::set_series_status(conn, &sonic.id, "completed"))
+        .unwrap();
+    assert_eq!(touched, 3);
+
+    let detail = db.with(|conn| repo::series_detail(conn, &sonic.id)).unwrap();
+    assert!(detail.issues.iter().all(|issue| issue.status == "completed"));
+
+    // The other series is untouched.
+    let other = series.iter().find(|entry| entry.title == "Shadow").unwrap();
+    let other_detail = db.with(|conn| repo::series_detail(conn, &other.id)).unwrap();
+    assert!(other_detail.issues.iter().all(|issue| issue.status != "completed"));
+
+    let files = db
+        .with(|conn| repo::set_series_direction(conn, &sonic.id, Some("rtl")))
+        .unwrap();
+    assert_eq!(files, 3);
+    let payload = db
+        .with(|conn| repo::reader_payload(conn, &detail.issues[0].id))
+        .unwrap();
+    assert_eq!(payload.reading_direction, "rtl");
+
+    // Clearing the per-file override falls back to the series/global default.
+    let cleared = db
+        .with(|conn| repo::set_series_direction(conn, &sonic.id, None))
+        .unwrap();
+    assert_eq!(cleared, 3);
+    let payload = db
+        .with(|conn| repo::reader_payload(conn, &detail.issues[0].id))
+        .unwrap();
+    assert_ne!(payload.reading_direction, "rtl");
+
+    assert!(db
+        .with(|conn| repo::set_series_status(conn, &sonic.id, "bogus"))
+        .is_err());
+}
+
+#[test]
+fn generated_orders_skip_alternate_covers() {
+    let (dir, db) = setup("variant-orders");
+    let library_dir = dir.join("library");
+    std::fs::create_dir_all(&library_dir).unwrap();
+    write_cbz_with_info(&library_dir.join("Sonic 001.cbz"), 2, "Sonic", "1", "Issue 1");
+    write_cbz_with_info(&library_dir.join("Sonic 002.cbz"), 2, "Sonic", "2", "Issue 2");
+    write_cbz_with_info(
+        &library_dir.join("Sonic 001 variant.cbz"),
+        3,
+        "Sonic",
+        "1",
+        "Issue 1 Variant",
+    );
+    db.with(|conn| library::import_root(conn, &library_dir)).unwrap();
+
+    let snapshot = db
+        .with(|conn| {
+            repo::library_snapshot(
+                conn,
+                &LibraryFilter {
+                    search: String::new(),
+                    universe: None,
+                    publisher: None,
+                    series_id: None,
+                    status: None,
+                    sort: "number".into(),
+                    descending: false,
+                },
+            )
+        })
+        .unwrap();
+    let base = snapshot.issues.iter().find(|issue| issue.title == "Issue 1").unwrap();
+    let variant = snapshot
+        .issues
+        .iter()
+        .find(|issue| issue.title == "Issue 1 Variant")
+        .unwrap();
+
+    db.with(|conn| {
+        repo::update_issue(
+            conn,
+            &variant.id,
+            &IssuePatch {
+                variant_of: Some(base.id.clone()),
+                edition: Some("Cover B".into()),
+                ..Default::default()
+            },
+        )
+    })
+    .unwrap();
+
+    let order = db
+        .with(|conn| repo::build_publication_order(conn, "Publication"))
+        .unwrap();
+    assert_eq!(order.items.len(), 2, "alternate cover must not add a read");
+    assert!(order.items.iter().all(|item| item.issue_id != variant.id));
+}
+
+#[test]
 fn series_cover_override_wins_over_first_issue() {
     let (dir, db) = setup("series-cover");
     let library_dir = dir.join("library");

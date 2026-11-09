@@ -50,6 +50,7 @@ export default function ReaderPage() {
   const [transitioning, setTransitioning] = useState(false);
   const [bookmarksOpen, setBookmarksOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [jumpValue, setJumpValue] = useState("");
   const [bookmarks, setBookmarks] = useState<
     { id: string; page: number; label: string | null; note: string | null }[]
   >([]);
@@ -679,9 +680,29 @@ export default function ReaderPage() {
           <button className="btn btn-ghost btn-sm" onClick={next} aria-label="Next page">
             <Icon name="chevronRight" className="size-4" />
           </button>
-          <span className="w-16 text-right text-[11px] tabular-nums text-muted">
-            {page + 1} / {total}
-          </span>
+          <form
+            className="flex items-center gap-1 text-[11px] tabular-nums text-muted"
+            onSubmit={(event) => {
+              event.preventDefault();
+              const value = Number(jumpValue);
+              if (!Number.isFinite(value)) return;
+              const target = Math.max(0, Math.min(total - 1, Math.round(value) - 1));
+              if (mode === "double") goToSpread(spreadForPage(spreads, target));
+              else goToPage(target);
+              setJumpValue("");
+            }}
+          >
+            <input
+              value={jumpValue}
+              onChange={(event) => setJumpValue(event.currentTarget.value.replace(/[^0-9]/g, ""))}
+              inputMode="numeric"
+              placeholder={String(page + 1)}
+              aria-label="Jump to page"
+              title="Type a page number and press Enter"
+              className="w-10 rounded border border-[var(--line)] bg-[var(--surface-2)] px-1 py-0.5 text-center text-[11px] tabular-nums text-[var(--text)] outline-none focus:border-[var(--accent)]"
+            />
+            <span>/ {total}</span>
+          </form>
           <span className="hidden text-[10px] text-muted sm:inline">{Math.round(ratio * 100)}%</span>
         </div>
       </div>

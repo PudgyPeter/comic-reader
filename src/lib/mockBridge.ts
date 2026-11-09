@@ -258,6 +258,27 @@ const handlers: Record<string, (args: Json) => unknown> = {
     if (reader) reader.directionOverride = args.direction;
     return args.direction;
   },
+  set_series_direction: (args) => {
+    const issues = (store.issues as Json[]).filter(
+      (issue: Json) => issue.seriesId === args.seriesId,
+    );
+    for (const issue of issues) {
+      const reader = data.readers[issue.id];
+      if (reader) reader.directionOverride = args.direction;
+    }
+    return issues.length;
+  },
+  set_series_status: (args) => {
+    const issues = (store.issues as Json[]).filter(
+      (issue: Json) => issue.seriesId === args.seriesId,
+    );
+    for (const issue of issues) {
+      issue.status = args.status;
+      issue.lastPage = args.status === "completed" ? issue.pageCount - 1 : 0;
+      issue.completedAt = args.status === "completed" ? new Date().toISOString() : null;
+    }
+    return issues.length;
+  },
   set_missing_reason: (args) => {
     const series = (store.series as Json[]).find((entry: Json) => entry.id === args.seriesId);
     if (!series) throw new Error("Series not found");

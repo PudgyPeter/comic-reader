@@ -3,6 +3,7 @@ import { useSettings } from "../store/settings";
 import { useToast } from "../components/Toast";
 import { Icon } from "../components/Icon";
 import { cx, fitLabel, modeLabel, readingDirectionLabel } from "../lib/utils";
+import { findConflicts, invalidBindings, parseBindings, formatCombo } from "../lib/shortcuts";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api";
 
@@ -25,6 +26,8 @@ export default function SettingsPage() {
   const toast = useToast();
   const [exporting, setExporting] = useState(false);
   const orders = useQuery({ queryKey: ["orders"], queryFn: api.readingOrders });
+  const conflicts = findConflicts(settings.shortcuts);
+  const invalid = invalidBindings(settings.shortcuts);
 
   const exportData = async () => {
     setExporting(true);
@@ -275,6 +278,24 @@ export default function SettingsPage() {
       </Section>
 
       <Section title="Keyboard shortcuts" description="Comma-separate multiple bindings. Use Ctrl, Shift and Alt modifiers.">
+        {(conflicts.length > 0 || invalid.length > 0) && (
+          <div className="mb-3 rounded-lg border border-[var(--warn)]/40 bg-[var(--warn)]/8 px-3 py-2">
+            {conflicts.map((conflict) => (
+              <p key={conflict.combo} className="text-[11px] text-[var(--warn)]">
+                <span className="font-mono">{formatCombo(parseBindings(conflict.combo)[0] ?? { ctrl: false, shift: false, alt: false, key: conflict.combo })}</span>
+                {" "}is bound to {conflict.keys.map((key) => SHORTCUT_LABELS[key] ?? key).join(" and ")}.
+              </p>
+            ))}
+            {invalid.map((action) => (
+              <p key={action} className="text-[11px] text-[var(--warn)]">
+                {SHORTCUT_LABELS[action] ?? action} has a binding with no key (only modifiers).
+              </p>
+            ))}
+            <p className="mt-1 text-[10px] text-muted">
+              Conflicting bindings still work, but only the first matching action runs.
+            </p>
+          </div>
+        )}
         <div className="space-y-2">
           {Object.keys(SHORTCUT_LABELS).map((key) => (
             <div key={key} className="flex items-center gap-3">
@@ -295,6 +316,30 @@ export default function SettingsPage() {
             </div>
           ))}
         </div>
+        <details className="mt-4 rounded-lg border border-[var(--line)] bg-[var(--surface-1)] px-3 py-2">
+          <summary className="cursor-pointer text-xs font-medium text-[var(--text-strong)]">
+            Shortcut cheat sheet
+          </summary>
+          <dl className="mt-2 space-y-1.5 text-[11px]">
+            {[
+              ...Object.keys(SHORTCUT_LABELS).map((key) => [
+                SHORTCUT_LABELS[key],
+                settings.shortcuts[key] ?? "",
+              ]),
+              ["Cycle reading mode", "D"],
+              ["Cycle page fit", "1 2 3 4"],
+              ["Hide interface", "H"],
+              ["Show this cheat sheet", "?"],
+            ].map(([label, keys]) => (
+              <div key={label} className="flex items-center justify-between gap-3">
+                <dt className="text-muted">{label}</dt>
+                <dd className="rounded border border-[var(--line)] bg-[var(--surface-2)] px-1.5 py-0.5 font-mono text-[10px]">
+                  {keys || "—"}
+                </dd>
+              </div>
+            ))}
+          </dl>
+        </details>
       </Section>
 
       <Section title="Data" description="Your library lives in a local SQLite database.">

@@ -1,7 +1,9 @@
 # Comic Reader — Development Roadmap
 
-> **Status:** CORE (Stage 1) implemented. See [`HANDOVER.md`](./HANDOVER.md) for current
-> state; stages below track what remains.
+> **Status:** CORE (Stage 1) partly implemented. Reading, library, series, collections,
+> orders, search, stats and spoiler filtering work offline; metadata providers, FTS5 search,
+> smart collections, unmatched-file matching and per-profile spoilers are not started. See
+> [`HANDOVER.md`](./HANDOVER.md) for the live remaining-work list.
 > **Companion documents:** [`ARCHITECTURE.md`](./ARCHITECTURE.md), [`DATA_MODEL.md`](./DATA_MODEL.md).
 > **Scope:** A local-first desktop comic reader and library for Tauri 2, React, TypeScript, Rust,
 > and SQLite.
@@ -41,12 +43,12 @@ A stage is not "done" because its features exist. It is done when:
 
 | Item | State |
 | --- | --- |
-| Tauri 2 shell | Implemented; 56 IPC commands, `comic://` asset protocol |
+| Tauri 2 shell | Implemented; 55 IPC commands, `comic://` asset protocol |
 | React UI | Library, Series, Reader, Collections, Orders, Search, History, Stats, Settings |
 | Rust modules | `db`, `library`, `archive`, `pdf`, `metadata`, `repo`, `protocol`, `commands`, `models` |
 | Database | Schema v4 with versioned migrations and pre-migration backups |
 | Archive support | CBZ, ZIP, CBR, image PDF, image folders |
-| Tests / lint / CI | 21 Rust integration tests, 20 Vitest tests, clippy `-D warnings`, eslint |
+| Tests / lint | 22 Rust integration tests, 20 Vitest tests, clippy `-D warnings`, eslint. No CI pipeline yet. |
 | Security config | Tightened CSP, scoped capability set |
 | Docs | `ARCHITECTURE.md`, `DATA_MODEL.md`, `HANDOVER.md`, this file |
 

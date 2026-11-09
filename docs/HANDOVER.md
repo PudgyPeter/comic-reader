@@ -5,8 +5,12 @@ is the spec; this file is only state.
 
 ## Verified green
 
-- `cd src-tauri && cargo test` -> 21 passed (`tests/core.rs`)
-- `npm test` -> 20 passed (Vitest)
+- `cd src-tauri && cargo test` -> 23 passed (`tests/core.rs`)
+- Test library generator: `cargo run --example sonic_fixture -- <library-dir> <db-dir>`
+  writes 26 synthetic CBZ issues (gaps at 7/12/15, one annual, one Cover B variant,
+  a companion run with one gap), imports them, and seeds progress, a bookmark,
+  a collection and a publication order.
+- `npm test` -> 28 passed (Vitest)
 - `npm run typecheck`, `npm run lint`, `npm run clippy`, `npm run build` -> clean
 - `cargo build --release` succeeds; runs against a seeded 25-issue library
 - Windows hardening done: dunce paths, forward-slash storage, NSIS/MSI bundle targets,
@@ -27,6 +31,15 @@ bookmarks with notes, per-file direction override, spread offset), Collections +
 (drag-and-drop reorder), Reading orders + detail (follow mode, auto-advance, drag-and-drop),
 Search, History, Stats, Settings, command palette, toasts, import progress + cancel.
 
+## Test library
+
+`cargo run --example sonic_fixture -- <library-dir> <db-dir>` writes 26 synthetic CBZ issues
+(Sonic the Hedgehog #1-20 minus 7/12/15, an Annual 2020, a Cover B variant linked to #3, and
+Sonic Universe #1-8 minus 4), imports them into the given database, and seeds progress, a
+bookmark, a collection and a publication order. All pages are generated shapes; nothing is
+copyrighted. Delete the DB first if it already holds test data, or the fixture will merge
+series and duplicate numbering.
+
 ## Schema notes (v3/v4)
 
 - v3: `series.reading_direction`, `missing_issues(series_id, number, reason)`.
@@ -39,6 +52,19 @@ Search, History, Stats, Settings, command palette, toasts, import progress + can
 
 ## Remaining work, in priority order
 
+0. **Hardening done this session.** App-level `ErrorBoundary`
+   (`src/components/ErrorBoundary.tsx`) wraps `<App />`; the library grid/list now grows a page
+   at a time via `src/hooks/useProgressiveList.ts` (sentinel + IntersectionObserver) instead of
+   mounting every issue; component CSS moved into `@layer components` so Tailwind utilities
+   (`w-auto`) actually win over `.input { width: 100% }`; the Most-read series bars scale by
+   read count instead of total issues; generated publication orders skip alternate covers;
+   coverless collection cards show one placeholder instead of four.
+   Also: rescan now drives the same sidebar progress panel as folder import (shared
+   `src/store/importActivity.ts`); series pages gained "Mark all read"/"Mark all unread" and a
+   bulk "Direction for all issues" select (`repo::set_series_status`,
+   `repo::set_series_direction`); the reader bottom bar has a numeric jump-to-page input;
+   Settings shows shortcut conflicts and an expandable cheat sheet
+   (`src/lib/shortcuts.ts`, 8 Vitest cases).
 1. **Light-theme visual pass — verified, keep as regression check.** All 11 routes (`/`, series
    list + detail, collections list + detail, orders list + detail, search, history, stats,
    settings) were captured in light + midnight via the mock harness. Fixed the last hardcoded
@@ -55,10 +81,9 @@ Search, History, Stats, Settings, command palette, toasts, import progress + can
    import commits; today correction happens after import from the library.
 5. **Reading session resume.** Sessions are recorded; resuming an interrupted session (as
    opposed to resuming page progress) is not modelled.
-6. **Settings: per-series direction default shortcut.** Direction exists per series and per
-   file; a bulk "set for all issues in series" action would speed up manga libraries.
-7. **Import progress for rescan in the UI.** The backend emits events for both paths, but the
-   library page's rescan button still shows only a spinner.
+6. **Mark up to a page.** Marking a whole series and a whole issue exist; marking "read up to
+   page N" (CORE-8) is still missing.
+7. **Continuous-mode scroll offset.** Resume re-scrolls to the page, not the exact offset.
 
 Deferred by design (Stage 2/3): panel detection, characters/relationships/locations/arcs/
 timeline, appearance tracking, sync, recommendations, full comparison view.

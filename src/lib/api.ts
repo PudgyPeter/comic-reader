@@ -84,6 +84,10 @@ export const api = {
     }),
   setIssueStatus: (issueId: string, status: string) =>
     command<IssueCard>("set_issue_status", { issueId, status }),
+  setSeriesDirection: (seriesId: string, direction: "ltr" | "rtl" | null) =>
+    command<number>("set_series_direction", { seriesId, direction }),
+  setSeriesStatus: (seriesId: string, status: string) =>
+    command<number>("set_series_status", { seriesId, status }),
   recordReadingSession: (issueId: string, pages: number, seconds: number) =>
     command<void>("record_reading_session", { issueId, pages, seconds }),
   search: (query: string, limit?: number) =>

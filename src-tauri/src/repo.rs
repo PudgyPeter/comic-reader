@@ -1214,8 +1214,11 @@ pub fn create_order(conn: &Connection, name: &str, description: Option<&str>, ki
 pub fn build_publication_order(conn: &mut Connection, name: &str) -> AppResult<ReadingOrderDetail> {
     let order = create_order(conn, name, Some("Generated from release dates"), "publication")?;
     let tx = conn.transaction()?;
+    // Alternate covers are the same story as their base issue, so a generated
+    // publication order must not list the variant as an extra read.
     let mut stmt = tx.prepare(
         "SELECT id FROM issues
+         WHERE variant_of IS NULL
          ORDER BY CASE WHEN release_date IS NULL THEN 1 ELSE 0 END, release_date,
                   CASE WHEN series_id IS NULL THEN 1 ELSE 0 END, series_id, sort_number",
     )?;
@@ -1722,4 +1725,56 @@ pub fn page_bytes(conn: &Connection, file_id: &str, page: i64) -> AppResult<(Vec
         "image/jpeg"
     };
     Ok((data, mime.into()))
+}
+
+/// Applies a reading-direction override to every issue file in a series.
+/// `None` clears the per-file override so the series default applies again.
+pub fn set_series_direction(
+    conn: &mut Connection,
+    series_id: &str,
+    direction: Option<&str>,
+) -> AppResult<i64> {
+    if let Some(value) = direction
+        && value != "ltr"
+        && value != "rtl"
+    {
+        return Err(AppError::invalid("reading direction must be ltr or rtl"));
+    }
+    let file_ids: Vec<String> = {
+        let mut stmt = conn.prepare(
+            "SELECT file_id FROM issues WHERE series_id = ?1 AND file_id IS NOT NULL",
+        )?;
+        let rows = stmt.query_map([series_id], |row| row.get::<_, String>(0))?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    let tx = conn.transaction()?;
+    let timestamp = now();
+    for file_id in &file_ids {
+        tx.execute(
+            "INSERT INTO file_preferences (file_id, spread_offset, reading_direction, updated_at)
+             VALUES (?1, 0, ?2, ?3)
+             ON CONFLICT(file_id) DO UPDATE SET reading_direction = excluded.reading_direction,
+                updated_at = excluded.updated_at",
+            params![file_id, direction, timestamp],
+        )?;
+    }
+    tx.commit()?;
+    Ok(file_ids.len() as i64)
+}
+
+/// Marks every issue in a series with the given status. Returns the number of
+/// issues touched.
+pub fn set_series_status(conn: &mut Connection, series_id: &str, status: &str) -> AppResult<i64> {
+    if !["unread", "in-progress", "completed"].contains(&status) {
+        return Err(AppError::invalid("unknown status"));
+    }
+    let ids: Vec<String> = {
+        let mut stmt = conn.prepare("SELECT id FROM issues WHERE series_id = ?1")?;
+        let rows = stmt.query_map([series_id], |row| row.get::<_, String>(0))?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    for id in &ids {
+        set_status(conn, id, status)?;
+    }
+    Ok(ids.len() as i64)
 }

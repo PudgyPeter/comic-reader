@@ -266,6 +266,34 @@ pub async fn save_progress(
 }
 
 #[tauri::command]
+pub async fn set_series_direction(
+    state: State<'_, AppState>,
+    series_id: String,
+    direction: Option<String>,
+) -> AppResult<i64> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        db.with(|conn| repo::set_series_direction(conn, &series_id, direction.as_deref()))
+    })
+    .await
+    .map_err(|err| AppError::message(err.to_string()))?
+}
+
+#[tauri::command]
+pub async fn set_series_status(
+    state: State<'_, AppState>,
+    series_id: String,
+    status: String,
+) -> AppResult<i64> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        db.with(|conn| repo::set_series_status(conn, &series_id, &status))
+    })
+    .await
+    .map_err(|err| AppError::message(err.to_string()))?
+}
+
+#[tauri::command]
 pub async fn set_issue_status(
     state: State<'_, AppState>,
     issue_id: String,

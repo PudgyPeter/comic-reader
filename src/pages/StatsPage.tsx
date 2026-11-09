@@ -24,7 +24,7 @@ export default function StatsPage() {
 
   const stats = query.data;
   const completion = stats.totalIssues ? stats.completed / stats.totalIssues : 0;
-  const maxSeries = Math.max(1, ...stats.topSeries.map((entry) => entry.total));
+  const maxSeries = Math.max(1, ...stats.topSeries.map((entry) => entry.read));
 
   const cards = [
     { label: "Issues read", value: stats.completed, hint: `of ${stats.totalIssues}`, icon: "book" },
@@ -87,7 +87,7 @@ export default function StatsPage() {
                   <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-[var(--surface-3)]">
                     <div
                       className="h-full rounded-full bg-[var(--accent)]"
-                      style={{ width: `${(entry.total / maxSeries) * 100}%` }}
+                      style={{ width: `${(entry.read / maxSeries) * 100}%` }}
                     />
                   </div>
                 </div>

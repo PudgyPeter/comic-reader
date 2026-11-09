@@ -4,6 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api, MOCK_MODE } from "../lib/api";
 import type { ImportProgress } from "../lib/types";
 import { cx, eventMatches, isEditableTarget } from "../lib/utils";
+import { useImportActivity } from "../store/importActivity";
 import { useSettings } from "../store/settings";
 import { useToast } from "./Toast";
 import { Icon } from "./Icon";
@@ -138,8 +139,10 @@ export function AppShell() {
   const settings = useSettings((state) => state.settings);
   const toast = useToast();
   const [paletteOpen, setPaletteOpen] = useState(false);
-  const [importing, setImporting] = useState(false);
   const [progress, setProgress] = useState<ImportProgress | null>(null);
+  const importing = useImportActivity((state) => state.active);
+  const beginActivity = useImportActivity((state) => state.start);
+  const endActivity = useImportActivity((state) => state.end);
   const contentRef = useRef<HTMLDivElement>(null);
 
   const navCollapsed = settings.density === "compact";
@@ -194,7 +197,7 @@ export function AppShell() {
     const { open } = await import("@tauri-apps/plugin-dialog");
     const selection = await open({ directory: true, multiple: false, title: "Add library folder" });
     if (!selection || Array.isArray(selection)) return;
-    setImporting(true);
+    beginActivity("Importing folder");
     setProgress(null);
     try {
       const result = await api.addLibraryRoot(selection);
@@ -217,7 +220,7 @@ export function AppShell() {
         toast.push(String(error), "error");
       }
     } finally {
-      setImporting(false);
+      endActivity();
       setProgress(null);
     }
   };
