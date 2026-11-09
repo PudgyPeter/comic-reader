@@ -39,6 +39,44 @@ pub async fn add_library_root(
 }
 
 #[tauri::command]
+pub async fn preview_import(
+    state: State<'_, AppState>,
+    path: String,
+) -> AppResult<Vec<ImportCandidate>> {
+    let db = state.db.clone();
+    let control = state.import_control.clone();
+    control.reset();
+    tauri::async_runtime::spawn_blocking(move || {
+        let target = PathBuf::from(&path);
+        db.with(|conn| library::preview_import(conn, &target, &control))
+    })
+    .await
+    .map_err(|err| AppError::message(err.to_string()))?
+}
+
+#[tauri::command]
+pub async fn commit_import(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+    overrides: Vec<ImportOverride>,
+) -> AppResult<ImportResult> {
+    let db = state.db.clone();
+    let control = state.import_control.clone();
+    control.reset();
+    tauri::async_runtime::spawn_blocking(move || {
+        let target = PathBuf::from(&path);
+        db.with(|conn| {
+            library::commit_import(conn, &target, &control, &overrides, |progress| {
+                let _ = app.emit("import-progress", progress);
+            })
+        })
+    })
+    .await
+    .map_err(|err| AppError::message(err.to_string()))?
+}
+
+#[tauri::command]
 pub async fn cancel_import(state: State<'_, AppState>) -> AppResult<bool> {
     state.import_control.cancel();
     Ok(true)
@@ -190,6 +228,20 @@ pub async fn bulk_update_issues(
 }
 
 #[tauri::command]
+pub async fn refresh_issue_metadata(
+    state: State<'_, AppState>,
+    issue_id: String,
+    force: Option<bool>,
+) -> AppResult<bool> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        db.with(|conn| repo::refresh_issue_metadata(conn, &issue_id, force.unwrap_or(false)))
+    })
+    .await
+    .map_err(|err| AppError::message(err.to_string()))?
+}
+
+#[tauri::command]
 pub async fn set_missing_reason(
     state: State<'_, AppState>,
     series_id: String,
@@ -217,6 +269,19 @@ pub async fn reader_payload(state: State<'_, AppState>, issue_id: String) -> App
     let db = state.db.clone();
     tauri::async_runtime::spawn_blocking(move || {
         db.with(|conn| repo::reader_payload(conn, &issue_id))
+    })
+    .await
+    .map_err(|err| AppError::message(err.to_string()))?
+}
+
+#[tauri::command]
+pub async fn issue_variants(
+    state: State<'_, AppState>,
+    issue_id: String,
+) -> AppResult<Vec<IssueCard>> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        db.with(|conn| repo::issue_variants(conn, &issue_id))
     })
     .await
     .map_err(|err| AppError::message(err.to_string()))?
@@ -255,11 +320,85 @@ pub async fn save_progress(
     state: State<'_, AppState>,
     issue_id: String,
     page: i64,
+    scroll_offset: Option<f64>,
     completion_threshold: Option<f64>,
 ) -> AppResult<ProgressState> {
     let db = state.db.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        db.with(|conn| repo::save_progress(conn, &issue_id, page, completion_threshold))
+        db.with(|conn| {
+            repo::save_reading_position(conn, &issue_id, page, scroll_offset, completion_threshold)
+        })
+    })
+    .await
+    .map_err(|err| AppError::message(err.to_string()))?
+}
+
+#[tauri::command]
+pub async fn mark_issue_to_page(
+    state: State<'_, AppState>,
+    issue_id: String,
+    page: i64,
+) -> AppResult<ProgressState> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        db.with(|conn| repo::mark_to_page(conn, &issue_id, page))
+    })
+    .await
+    .map_err(|err| AppError::message(err.to_string()))?
+}
+
+#[tauri::command]
+pub async fn start_reading_session(
+    state: State<'_, AppState>,
+    issue_id: String,
+    page: i64,
+) -> AppResult<String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        db.with(|conn| repo::start_session(conn, &issue_id, page))
+    })
+    .await
+    .map_err(|err| AppError::message(err.to_string()))?
+}
+
+#[tauri::command]
+pub async fn touch_reading_session(
+    state: State<'_, AppState>,
+    session_id: String,
+    pages: i64,
+    last_page: i64,
+) -> AppResult<()> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        db.with(|conn| repo::touch_session(conn, &session_id, pages, last_page))
+    })
+    .await
+    .map_err(|err| AppError::message(err.to_string()))?
+}
+
+#[tauri::command]
+pub async fn close_reading_session(
+    state: State<'_, AppState>,
+    session_id: String,
+    pages: i64,
+    last_page: i64,
+) -> AppResult<()> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        db.with(|conn| repo::close_session(conn, &session_id, pages, last_page))
+    })
+    .await
+    .map_err(|err| AppError::message(err.to_string()))?
+}
+
+#[tauri::command]
+pub async fn resume_reading_session(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> AppResult<()> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        db.with(|conn| repo::resume_session(conn, &session_id))
     })
     .await
     .map_err(|err| AppError::message(err.to_string()))?
@@ -334,6 +473,33 @@ pub async fn search_library(
     })
     .await
     .map_err(|err| AppError::message(err.to_string()))?
+}
+
+#[tauri::command]
+pub async fn search_filtered(
+    state: State<'_, AppState>,
+    filter: SearchFilter,
+) -> AppResult<SearchResult> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || db.with(|conn| repo::search_filtered(conn, &filter)))
+        .await
+        .map_err(|err| AppError::message(err.to_string()))?
+}
+
+#[tauri::command]
+pub async fn recent_searches(state: State<'_, AppState>) -> AppResult<Vec<RecentSearch>> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || db.with(|conn| repo::recent_searches(conn)))
+        .await
+        .map_err(|err| AppError::message(err.to_string()))?
+}
+
+#[tauri::command]
+pub async fn clear_search_history(state: State<'_, AppState>) -> AppResult<()> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || db.with(|conn| repo::clear_search_history(conn)))
+        .await
+        .map_err(|err| AppError::message(err.to_string()))?
 }
 
 #[tauri::command]
@@ -511,19 +677,33 @@ pub async fn create_collection(
 pub async fn update_collection(
     state: State<'_, AppState>,
     collection_id: String,
-    name: Option<String>,
+    patch: CollectionPatch,
+) -> AppResult<Collection> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        db.with(|conn| repo::update_collection(conn, &collection_id, &patch))
+    })
+    .await
+    .map_err(|err| AppError::message(err.to_string()))?
+}
+
+#[tauri::command]
+pub async fn create_smart_collection(
+    state: State<'_, AppState>,
+    name: String,
     description: Option<String>,
-    cover_file_id: Option<String>,
+    rules: SmartRules,
+    sort_mode: Option<String>,
 ) -> AppResult<Collection> {
     let db = state.db.clone();
     tauri::async_runtime::spawn_blocking(move || {
         db.with(|conn| {
-            repo::update_collection(
+            repo::create_smart_collection(
                 conn,
-                &collection_id,
-                name.as_deref(),
+                &name,
                 description.as_deref(),
-                cover_file_id.as_deref(),
+                &rules,
+                sort_mode.as_deref(),
             )
         })
     })
@@ -747,6 +927,181 @@ pub async fn export_library(state: State<'_, AppState>) -> AppResult<serde_json:
                 "totals": snapshot.totals,
             }))
         })
+    })
+    .await
+    .map_err(|err| AppError::message(err.to_string()))?
+}
+
+#[tauri::command]
+pub async fn unmatched_files(state: State<'_, AppState>) -> AppResult<Vec<UnmatchedFile>> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || db.with(|conn| repo::unmatched_files(conn)))
+        .await
+        .map_err(|err| AppError::message(err.to_string()))?
+}
+
+#[tauri::command]
+pub async fn file_proposal(state: State<'_, AppState>, file_id: String) -> AppResult<FileProposal> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || db.with(|conn| repo::file_proposal(conn, &file_id)))
+        .await
+        .map_err(|err| AppError::message(err.to_string()))?
+}
+
+#[tauri::command]
+pub async fn match_file_to_new_issue(
+    state: State<'_, AppState>,
+    file_id: String,
+    patch: MatchFilePatch,
+) -> AppResult<IssueCard> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        db.with(|conn| repo::match_file_to_new_issue(conn, &file_id, &patch))
+    })
+    .await
+    .map_err(|err| AppError::message(err.to_string()))?
+}
+
+#[tauri::command]
+pub async fn match_file_to_existing_issue(
+    state: State<'_, AppState>,
+    file_id: String,
+    issue_id: String,
+) -> AppResult<IssueCard> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        db.with(|conn| repo::match_file_to_existing_issue(conn, &file_id, &issue_id))
+    })
+    .await
+    .map_err(|err| AppError::message(err.to_string()))?
+}
+
+#[tauri::command]
+pub async fn fileless_issues(state: State<'_, AppState>) -> AppResult<Vec<IssueCard>> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || db.with(|conn| repo::fileless_issues(conn)))
+        .await
+        .map_err(|err| AppError::message(err.to_string()))?
+}
+
+#[tauri::command]
+pub async fn apply_file_match(
+    state: State<'_, AppState>,
+    file_id: String,
+    patch: MatchFilePatch,
+    issue_id: Option<String>,
+) -> AppResult<IssueCard> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        db.with(|conn| match issue_id.as_deref().filter(|id| !id.is_empty()) {
+            Some(issue_id) => repo::match_file_to_existing_issue(conn, &file_id, issue_id),
+            None => repo::match_file_to_new_issue(conn, &file_id, &patch),
+        })
+    })
+    .await
+    .map_err(|err| AppError::message(err.to_string()))?
+}
+
+#[tauri::command]
+pub async fn file_reader_payload(
+    state: State<'_, AppState>,
+    file_id: String,
+) -> AppResult<ReaderPayload> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        db.with(|conn| repo::file_reader_payload(conn, &file_id))
+    })
+    .await
+    .map_err(|err| AppError::message(err.to_string()))?
+}
+
+#[tauri::command]
+pub async fn save_file_progress(
+    state: State<'_, AppState>,
+    file_id: String,
+    page: i64,
+    offset: Option<f64>,
+) -> AppResult<FileProgressState> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        db.with(|conn| repo::save_file_progress(conn, &file_id, page, offset))
+    })
+    .await
+    .map_err(|err| AppError::message(err.to_string()))?
+}
+
+#[tauri::command]
+pub async fn file_bookmarks(
+    state: State<'_, AppState>,
+    file_id: String,
+) -> AppResult<Vec<serde_json::Value>> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || db.with(|conn| repo::file_bookmarks(conn, &file_id)))
+        .await
+        .map_err(|err| AppError::message(err.to_string()))?
+}
+
+#[tauri::command]
+pub async fn add_file_bookmark(
+    state: State<'_, AppState>,
+    file_id: String,
+    page: i64,
+    label: Option<String>,
+    note: Option<String>,
+) -> AppResult<serde_json::Value> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        db.with(|conn| repo::add_file_bookmark(conn, &file_id, page, label.as_deref(), note.as_deref()))
+    })
+    .await
+    .map_err(|err| AppError::message(err.to_string()))?
+}
+
+#[tauri::command]
+pub async fn update_file_bookmark_note(
+    state: State<'_, AppState>,
+    id: String,
+    note: Option<String>,
+) -> AppResult<serde_json::Value> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        db.with(|conn| repo::update_file_bookmark_note(conn, &id, note.as_deref()))
+    })
+    .await
+    .map_err(|err| AppError::message(err.to_string()))?
+}
+
+#[tauri::command]
+pub async fn delete_file_bookmark(state: State<'_, AppState>, id: String) -> AppResult<()> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || db.with(|conn| repo::delete_file_bookmark(conn, &id)))
+        .await
+        .map_err(|err| AppError::message(err.to_string()))?
+}
+
+#[tauri::command]
+pub async fn set_file_spread_offset(
+    state: State<'_, AppState>,
+    file_id: String,
+    offset: i64,
+) -> AppResult<i64> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        db.with(|conn| repo::set_file_spread_offset(conn, &file_id, offset))
+    })
+    .await
+    .map_err(|err| AppError::message(err.to_string()))?
+}
+
+#[tauri::command]
+pub async fn set_file_direction_override(
+    state: State<'_, AppState>,
+    file_id: String,
+    direction: Option<String>,
+) -> AppResult<Option<String>> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        db.with(|conn| repo::set_file_direction_override(conn, &file_id, direction.as_deref()))
     })
     .await
     .map_err(|err| AppError::message(err.to_string()))?

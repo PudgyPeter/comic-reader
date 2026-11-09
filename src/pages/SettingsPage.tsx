@@ -209,6 +209,30 @@ export default function SettingsPage() {
             className="w-full accent-[var(--accent)]"
           />
         </Field>
+        <Field label={`Brightness — ${Math.round(settings.brightness * 100)}%`}>
+          <input
+            type="range"
+            min={40}
+            max={140}
+            step={5}
+            value={Math.round(settings.brightness * 100)}
+            onChange={(event) =>
+              update({ brightness: Number(event.currentTarget.value) / 100 })
+            }
+            className="w-full accent-[var(--accent)]"
+          />
+        </Field>
+        <Field label={`Gamma — ${settings.gamma.toFixed(1)}`}>
+          <input
+            type="range"
+            min={0.5}
+            max={2}
+            step={0.1}
+            value={settings.gamma}
+            onChange={(event) => update({ gamma: Number(event.currentTarget.value) })}
+            className="w-full accent-[var(--accent)]"
+          />
+        </Field>
         <Field label="Interface density">
           <select
             className="input"

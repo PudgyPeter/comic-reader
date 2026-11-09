@@ -47,6 +47,8 @@ export default function CollectionDetailPage() {
     toast.push("Order saved", "success");
   };
 
+  const isSmart = query.data?.isSmart ?? false;
+
   if (query.isLoading) {
     return (
       <div className="grid h-64 place-items-center">
@@ -73,7 +75,9 @@ export default function CollectionDetailPage() {
 
       <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
         <div>
-          <p className="text-[11px] uppercase tracking-[0.18em] text-muted">Collection</p>
+          <p className="text-[11px] uppercase tracking-[0.18em] text-muted">
+            {collection.isSmart ? "Smart collection" : "Collection"}
+          </p>
           <h1 className="mt-1 font-display text-3xl font-semibold tracking-tight">{collection.name}</h1>
           <p className="mt-2 max-w-xl text-sm text-muted">
             {collection.description || "No description."}
@@ -96,7 +100,8 @@ export default function CollectionDetailPage() {
               </button>
             </>
           ) : (
-            items.length > 1 && (
+            items.length > 1 &&
+            !isSmart && (
               <button className="btn btn-sm" onClick={() => setOrder([...ids])}>
                 <Icon name="list" className="size-3.5" /> Reorder
               </button>
@@ -105,10 +110,24 @@ export default function CollectionDetailPage() {
         </div>
       </div>
 
+      {isSmart && (
+        <div className="mb-4 flex flex-wrap items-center gap-2 rounded-xl border border-[var(--line)] bg-[var(--surface-1)] px-3 py-2 text-[11px] text-muted">
+          <Icon name="filter" className="size-3.5" />
+          <span>
+            Membership is computed from saved rules, so it updates as the library changes.
+            Sorted by <span className="font-medium text-muted">{collection.sortMode.replace(/_/g, " ")}</span>.
+          </span>
+        </div>
+      )}
+
       {items.length === 0 ? (
         <EmptyState
-          title="Nothing here yet"
-          body="Add issues from the library (select issues → Add to collection) or from a series page."
+          title={isSmart ? "No issues match these rules" : "Nothing here yet"}
+          body={
+            isSmart
+              ? "Edit the collection rules to include more issues."
+              : "Add issues from the library (select issues → Add to collection) or from a series page."
+          }
           action={
             <Link to="/" className="btn btn-primary">
               Browse library
@@ -176,23 +195,25 @@ export default function CollectionDetailPage() {
               </Link>
               <ProgressBar value={progressRatio(issue)} className="hidden w-20 sm:block" />
               <StatusBadge status={issue.status} />
-              <button
-                className="rounded p-1 text-muted hover:bg-[var(--surface-3)] hover:text-rose-300"
-                aria-label="Remove from collection"
-                onClick={async () => {
-                  await api.removeFromCollection(collectionId, [issue.id]);
-                  await queryClient.invalidateQueries({ queryKey: ["collection", collectionId] });
-                  setOrder(null);
-                }}
-              >
-                <Icon name="x" className="size-3.5" />
-              </button>
+              {!isSmart && (
+                <button
+                  className="rounded p-1 text-muted hover:bg-[var(--surface-3)] hover:text-rose-300"
+                  aria-label="Remove from collection"
+                  onClick={async () => {
+                    await api.removeFromCollection(collectionId, [issue.id]);
+                    await queryClient.invalidateQueries({ queryKey: ["collection", collectionId] });
+                    setOrder(null);
+                  }}
+                >
+                  <Icon name="x" className="size-3.5" />
+                </button>
+              )}
             </div>
           ))}
         </div>
       )}
 
-      {items.length > 1 && !order && (
+      {items.length > 1 && !order && !isSmart && (
         <p className={cx("mt-3 text-[11px] text-muted")}>
           Tip: drag any row to reorder it, or use the arrow controls. Both update the saved order.
         </p>

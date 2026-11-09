@@ -24,6 +24,7 @@ fn main() {
     let orders = db.with(|conn| repo::orders(conn)).unwrap();
     let collections = db.with(|conn| repo::collections(conn)).unwrap();
     let search = db.with(|conn| repo::search(conn, "Sonic", 100)).unwrap();
+    let unmatched = db.with(|conn| repo::unmatched_files(conn)).unwrap_or_default();
 
     let mut series_details = serde_json::Map::new();
     for series in &snapshot.series {
@@ -54,6 +55,7 @@ fn main() {
     let history = db.with(|conn| repo::reading_history(conn, 150)).unwrap_or_else(|_| {
         comic_reader_lib::models::HistoryPayload {
             sessions: Vec::new(),
+            interrupted: Vec::new(),
             recent: Vec::new(),
         }
     });
@@ -70,6 +72,10 @@ fn main() {
         "seriesDetails": series_details,
         "readers": readers,
         "search": search,
+        "unmatchedFiles": unmatched,
+        "recentSearches": db
+            .with(|conn| repo::recent_searches(conn))
+            .unwrap_or_default(),
     });
     std::fs::write(&out, serde_json::to_string(&payload).unwrap()).unwrap();
     println!("exported {}", out.display());

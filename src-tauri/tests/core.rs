@@ -1395,3 +1395,1013 @@ fn imports_image_pdf() {
     assert_eq!(&bytes[..2], &[0xFF, 0xD8]);
     assert_eq!(mime, "image/jpeg");
 }
+
+
+#[test]
+fn mark_to_page_sets_position_and_completes_on_last_page() {
+    let (dir, db) = setup("mark-to-page");
+    let library_dir = dir.join("library");
+    std::fs::create_dir_all(&library_dir).unwrap();
+    write_cbz_with_info(&library_dir.join("Sonic 001.cbz"), 5, "Sonic", "1", "Issue 1");
+    db.with(|conn| library::import_root(conn, &library_dir)).unwrap();
+    let snapshot = db
+        .with(|conn| {
+            repo::library_snapshot(
+                conn,
+                &LibraryFilter {
+                    search: String::new(),
+                    universe: None,
+                    publisher: None,
+                    series_id: None,
+                    status: None,
+                    sort: "number".into(),
+                    descending: false,
+                },
+            )
+        })
+        .unwrap();
+    let issue = &snapshot.issues[0];
+
+    let state = db.with(|conn| repo::mark_to_page(conn, &issue.id, 2)).unwrap();
+    assert_eq!(state.page, 2);
+    assert_eq!(state.status, "in-progress");
+
+    // Marking backwards from a completed issue keeps it completed.
+    db.with(|conn| repo::mark_to_page(conn, &issue.id, 4)).unwrap();
+    let state = db.with(|conn| repo::mark_to_page(conn, &issue.id, 1)).unwrap();
+    assert_eq!(state.status, "completed");
+
+    let state = db.with(|conn| repo::mark_to_page(conn, &issue.id, 99)).unwrap();
+    assert_eq!(state.page, 4);
+    assert_eq!(state.status, "completed");
+
+    let card = db.with(|conn| repo::issue(conn, &issue.id)).unwrap();
+    assert_eq!(card.status, "completed");
+}
+
+#[test]
+fn scroll_offset_survives_saves_and_is_clamped() {
+    let (dir, db) = setup("scroll-offset");
+    let library_dir = dir.join("library");
+    std::fs::create_dir_all(&library_dir).unwrap();
+    write_cbz_with_info(&library_dir.join("Sonic 001.cbz"), 6, "Sonic", "1", "Issue 1");
+    db.with(|conn| library::import_root(conn, &library_dir)).unwrap();
+    let snapshot = db
+        .with(|conn| {
+            repo::library_snapshot(
+                conn,
+                &LibraryFilter {
+                    search: String::new(),
+                    universe: None,
+                    publisher: None,
+                    series_id: None,
+                    status: None,
+                    sort: "number".into(),
+                    descending: false,
+                },
+            )
+        })
+        .unwrap();
+    let issue = &snapshot.issues[0];
+
+    db.with(|conn| repo::save_reading_position(conn, &issue.id, 3, Some(0.4), None))
+        .unwrap();
+    let reader = db.with(|conn| repo::reader_payload(conn, &issue.id)).unwrap();
+    assert_eq!(reader.progress.page, 3);
+    assert!((reader.progress.scroll_offset - 0.4).abs() < 0.001);
+
+    // A save without an offset (paged modes) keeps the stored continuous offset.
+    db.with(|conn| repo::save_reading_position(conn, &issue.id, 4, None, None))
+        .unwrap();
+    let reader = db.with(|conn| repo::reader_payload(conn, &issue.id)).unwrap();
+    assert!((reader.progress.scroll_offset - 0.4).abs() < 0.001);
+
+    // Out-of-range values are clamped rather than trusted.
+    db.with(|conn| repo::save_reading_position(conn, &issue.id, 3, Some(9.0), None))
+        .unwrap();
+    let reader = db.with(|conn| repo::reader_payload(conn, &issue.id)).unwrap();
+    assert!((reader.progress.scroll_offset - 1.0).abs() < 0.001);
+}
+
+#[test]
+fn open_sessions_are_listed_as_interrupted_until_resumed() {
+    let (dir, db) = setup("session-resume");
+    let library_dir = dir.join("library");
+    std::fs::create_dir_all(&library_dir).unwrap();
+    write_cbz_with_info(&library_dir.join("Sonic 001.cbz"), 4, "Sonic", "1", "Issue 1");
+    db.with(|conn| library::import_root(conn, &library_dir)).unwrap();
+    let snapshot = db
+        .with(|conn| {
+            repo::library_snapshot(
+                conn,
+                &LibraryFilter {
+                    search: String::new(),
+                    universe: None,
+                    publisher: None,
+                    series_id: None,
+                    status: None,
+                    sort: "number".into(),
+                    descending: false,
+                },
+            )
+        })
+        .unwrap();
+    let issue = &snapshot.issues[0];
+
+    let session = db
+        .with(|conn| repo::start_session(conn, &issue.id, 0))
+        .unwrap();
+    db.with(|conn| repo::touch_session(conn, &session, 3, 2)).unwrap();
+
+    let history = db.with(|conn| repo::reading_history(conn, 10)).unwrap();
+    assert_eq!(history.sessions.len(), 0, "open sessions are not closed history");
+    assert_eq!(history.interrupted.len(), 1);
+    assert_eq!(history.interrupted[0].last_page, 2);
+    assert_eq!(history.interrupted[0].pages, 3);
+
+    db.with(|conn| repo::resume_session(conn, &session)).unwrap();
+    let history = db.with(|conn| repo::reading_history(conn, 10)).unwrap();
+    assert_eq!(history.interrupted.len(), 0);
+    assert_eq!(history.sessions.len(), 1);
+    assert!(history.sessions[0].resumed_at.is_some());
+
+    // Closing a session records the final position.
+    let session = db
+        .with(|conn| repo::start_session(conn, &issue.id, 1))
+        .unwrap();
+    db.with(|conn| repo::close_session(conn, &session, 2, 3)).unwrap();
+    let history = db.with(|conn| repo::reading_history(conn, 10)).unwrap();
+    assert_eq!(history.sessions.len(), 2);
+    assert_eq!(history.sessions[0].last_page, 3);
+}
+
+#[test]
+fn import_preview_proposes_metadata_and_commit_applies_corrections() {
+    let (dir, db) = setup("import-review");
+    let library_dir = dir.join("library");
+    std::fs::create_dir_all(&library_dir).unwrap();
+    write_cbz_with_info(
+        &library_dir.join("Sonic 001.cbz"),
+        3,
+        "Wrong Series",
+        "1",
+        "Wrong Title",
+    );
+
+    let control = library::ImportControl::new();
+    let preview = db
+        .with(|conn| library::preview_import(conn, &library_dir, &control))
+        .unwrap();
+    assert_eq!(preview.len(), 1);
+    assert_eq!(preview[0].series_title, "Wrong Series");
+    assert_eq!(preview[0].page_count, 3);
+
+    let override_entry = comic_reader_lib::models::ImportOverride {
+        relative_path: preview[0].relative_path.clone(),
+        series_title: Some("Sonic the Hedgehog".into()),
+        title: Some("Fallout".into()),
+        ..Default::default()
+    };
+    let result = db
+        .with(|conn| {
+            library::commit_import(conn, &library_dir, &control, &[override_entry], |_| {})
+        })
+        .unwrap();
+    assert_eq!(result.files_imported, 1);
+
+    let snapshot = db
+        .with(|conn| {
+            repo::library_snapshot(
+                conn,
+                &LibraryFilter {
+                    search: String::new(),
+                    universe: None,
+                    publisher: None,
+                    series_id: None,
+                    status: None,
+                    sort: "number".into(),
+                    descending: false,
+                },
+            )
+        })
+        .unwrap();
+    let issue = &snapshot.issues[0];
+    assert_eq!(issue.series_title.as_deref(), Some("Sonic the Hedgehog"));
+    assert_eq!(issue.title, "Fallout");
+
+    // A second preview skips files that are already indexed.
+    let preview = db
+        .with(|conn| library::preview_import(conn, &library_dir, &control))
+        .unwrap();
+    assert!(preview.is_empty());
+}
+
+#[test]
+fn variants_are_returned_for_comparison() {
+    let (dir, db) = setup("variant-compare");
+    let library_dir = dir.join("library");
+    std::fs::create_dir_all(&library_dir).unwrap();
+    write_cbz_with_info(&library_dir.join("Sonic 001.cbz"), 3, "Sonic", "1", "Issue 1");
+    write_cbz_with_info(&library_dir.join("Sonic 001B.cbz"), 3, "Sonic", "1B", "Issue 1 Cover B");
+    db.with(|conn| library::import_root(conn, &library_dir)).unwrap();
+    let snapshot = db
+        .with(|conn| {
+            repo::library_snapshot(
+                conn,
+                &LibraryFilter {
+                    search: String::new(),
+                    universe: None,
+                    publisher: None,
+                    series_id: None,
+                    status: None,
+                    sort: "number".into(),
+                    descending: false,
+                },
+            )
+        })
+        .unwrap();
+    let base = snapshot.issues.iter().find(|issue| issue.number == "1").unwrap().clone();
+    let variant = snapshot.issues.iter().find(|issue| issue.number == "1B").unwrap().clone();
+    db.with(|conn| {
+        repo::update_issue(
+            conn,
+            &variant.id,
+            &IssuePatch {
+                variant_of: Some(base.id.clone()),
+                edition: Some("Cover B".into()),
+                ..Default::default()
+            },
+        )
+    })
+    .unwrap();
+
+    let list = db.with(|conn| repo::issue_variants(conn, &base.id)).unwrap();
+    assert_eq!(list.len(), 2);
+    assert_eq!(list[0].id, base.id);
+    assert_eq!(list[1].id, variant.id);
+
+    let list = db.with(|conn| repo::issue_variants(conn, &variant.id)).unwrap();
+    assert_eq!(list.len(), 2);
+    assert_eq!(list[0].id, base.id);
+}
+
+#[test]
+fn migration_from_v4_preserves_progress_and_adds_session_columns() {
+    let (dir, db) = setup("migrate-v4");
+    let library_dir = dir.join("library");
+    std::fs::create_dir_all(&library_dir).unwrap();
+    write_cbz_with_info(&library_dir.join("Sonic 001.cbz"), 4, "Sonic", "1", "Issue 1");
+    db.with(|conn| library::import_root(conn, &library_dir)).unwrap();
+    let snapshot = db
+        .with(|conn| {
+            repo::library_snapshot(
+                conn,
+                &LibraryFilter {
+                    search: String::new(),
+                    universe: None,
+                    publisher: None,
+                    series_id: None,
+                    status: None,
+                    sort: "number".into(),
+                    descending: false,
+                },
+            )
+        })
+        .unwrap();
+    let issue = &snapshot.issues[0];
+    db.with(|conn| repo::save_progress(conn, &issue.id, 2, None))
+        .unwrap();
+
+    // Simulate a v4 database: remove the v5 columns and reset the version so
+    // the next open has to run MIGRATION_5.
+    db.with(|conn| {
+        conn.execute_batch(
+            "DROP INDEX IF EXISTS idx_sessions_status;
+             ALTER TABLE progress DROP COLUMN scroll_offset;
+             ALTER TABLE reading_sessions DROP COLUMN last_page;
+             ALTER TABLE reading_sessions DROP COLUMN status;
+             ALTER TABLE reading_sessions DROP COLUMN resumed_at;
+             ALTER TABLE issues DROP COLUMN metadata_locked;
+             ALTER TABLE series DROP COLUMN metadata_locked;
+             ALTER TABLE collections DROP COLUMN is_smart;
+             ALTER TABLE collections DROP COLUMN smart_rules;
+             ALTER TABLE collections DROP COLUMN sort_mode;
+             DROP TABLE IF EXISTS file_bookmarks;
+             DROP TABLE IF EXISTS file_progress;
+             UPDATE meta SET value = '4' WHERE key = 'schema_version';",
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    drop(db);
+
+    let db = Database::open(&dir.join("db")).unwrap();
+    let version: String = db
+        .with(|conn| {
+            conn.query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+        })
+        .unwrap();
+    assert_eq!(version, "9");
+
+    // Existing progress survives, with the new column defaulted.
+    let reader = db.with(|conn| repo::reader_payload(conn, &issue.id)).unwrap();
+    assert_eq!(reader.progress.page, 2);
+    assert_eq!(reader.progress.scroll_offset, 0.0);
+
+    // The new session columns work after migration.
+    let session = db
+        .with(|conn| repo::start_session(conn, &issue.id, 1))
+        .unwrap();
+    db.with(|conn| repo::close_session(conn, &session, 1, 2)).unwrap();
+    let history = db.with(|conn| repo::reading_history(conn, 10)).unwrap();
+    assert_eq!(history.sessions.len(), 1);
+    assert_eq!(history.sessions[0].last_page, 2);
+}
+
+
+#[test]
+fn scaled_page_bytes_respects_requested_width_and_caches_nothing() {
+    let (dir, db) = setup("page-scaled");
+    let library_dir = dir.join("library");
+    std::fs::create_dir_all(&library_dir).unwrap();
+    write_cbz_with_info(&library_dir.join("Sonic 001.cbz"), 2, "Sonic", "1", "Issue 1");
+    db.with(|conn| library::import_root(conn, &library_dir)).unwrap();
+    let snapshot = db
+        .with(|conn| {
+            repo::library_snapshot(
+                conn,
+                &LibraryFilter {
+                    search: String::new(),
+                    universe: None,
+                    publisher: None,
+                    series_id: None,
+                    status: None,
+                    sort: "number".into(),
+                    descending: false,
+                },
+            )
+        })
+        .unwrap();
+    let file_id = snapshot.issues[0].file_id.clone().unwrap();
+
+    let (bytes, mime) = db
+        .with(|conn| repo::page_bytes_scaled(conn, &file_id, 0, 1024))
+        .unwrap();
+    assert_eq!(mime, "image/jpeg");
+    let image = image::load_from_memory(&bytes).unwrap();
+    assert_eq!(image.width(), 1024);
+    assert!(image.height() > 0);
+
+    // Widths are clamped to a sane range rather than passed straight through.
+    let (bytes, _) = db
+        .with(|conn| repo::page_bytes_scaled(conn, &file_id, 0, 1))
+        .unwrap();
+    let image = image::load_from_memory(&bytes).unwrap();
+    assert_eq!(image.width(), 320);
+}
+
+#[test]
+fn fts_search_finds_notes_and_respects_spoilers() {
+    let (dir, db) = setup("fts-search");
+    let library_dir = dir.join("library");
+    std::fs::create_dir_all(&library_dir).unwrap();
+    write_cbz_with_info(&library_dir.join("Sonic 001.cbz"), 4, "Sonic", "1", "Fallout");
+    write_cbz_with_info(
+        &library_dir.join("Sonic 002.cbz"),
+        4,
+        "Sonic",
+        "2",
+        "The Fate of Dr. Eggman",
+    );
+    db.with(|conn| library::import_root(conn, &library_dir)).unwrap();
+    let snapshot = db
+        .with(|conn| {
+            repo::library_snapshot(
+                conn,
+                &LibraryFilter {
+                    search: String::new(),
+                    universe: None,
+                    publisher: None,
+                    series_id: None,
+                    status: None,
+                    sort: "number".into(),
+                    descending: false,
+                },
+            )
+        })
+        .unwrap();
+    let first = snapshot.issues.iter().find(|issue| issue.number == "1").unwrap();
+    let second = snapshot.issues.iter().find(|issue| issue.number == "2").unwrap();
+
+    // Bookmark notes are indexed through the trigger.
+    db.with(|conn| repo::add_bookmark(conn, &first.id, 1, Some("Quiet scene"), Some("whisper")))
+        .unwrap();
+
+    // Snippets are only produced for content the reader is allowed to see, so
+    // turn spoiler protection off for the snippet assertions.
+    let settings = Settings {
+        spoiler_protection: false,
+        ..Settings::default()
+    };
+    db.with(|conn| repo::save_settings(conn, &settings)).unwrap();
+
+    let hits = db
+        .with(|conn| {
+            repo::search_filtered(
+                conn,
+                &comic_reader_lib::models::SearchFilter {
+                    query: "whisper".into(),
+                    ..Default::default()
+                },
+            )
+        })
+        .unwrap();
+    assert_eq!(hits.issues.len(), 1);
+    assert_eq!(hits.issues[0].id, first.id);
+    assert!(hits.snippets.contains_key(&first.id));
+
+    // Prefix tokens match ("Eggm" -> Eggman) and the snippet carries the hit.
+    let hits = db
+        .with(|conn| {
+            repo::search_filtered(
+                conn,
+                &comic_reader_lib::models::SearchFilter {
+                    query: "Eggm".into(),
+                    ..Default::default()
+                },
+            )
+        })
+        .unwrap();
+    assert!(hits.issues.iter().any(|issue| issue.id == second.id));
+    let snippet = hits.snippets.get(&second.id).cloned().unwrap_or_default();
+    assert!(snippet.to_lowercase().contains("eggman"), "snippet was {snippet:?}");
+
+    // Spoiler-protected issues never get a snippet, even when they match.
+    let settings = Settings {
+        spoiler_protection: true,
+        ..Settings::default()
+    };
+    db.with(|conn| repo::save_settings(conn, &settings)).unwrap();
+    let protected = db
+        .with(|conn| {
+            repo::search_filtered(
+                conn,
+                &comic_reader_lib::models::SearchFilter {
+                    query: "test issue".into(),
+                    ..Default::default()
+                },
+            )
+        })
+        .unwrap();
+    for issue in &protected.issues {
+        if issue.spoiler_protected {
+            assert!(!protected.snippets.contains_key(&issue.id));
+        }
+    }
+}
+
+#[test]
+fn fts_search_pages_with_a_keyset_cursor() {
+    let (dir, db) = setup("fts-paging");
+    let library_dir = dir.join("library");
+    std::fs::create_dir_all(&library_dir).unwrap();
+    for number in 1..=5 {
+        write_cbz_with_info(
+            &library_dir.join(format!("Sonic {number:03}.cbz")),
+            3,
+            "Sonic",
+            &number.to_string(),
+            &format!("Chapter {number}"),
+        );
+    }
+    db.with(|conn| library::import_root(conn, &library_dir)).unwrap();
+
+    let mut collected = Vec::new();
+    let mut cursor: Option<String> = None;
+    for _ in 0..10 {
+        let page = db
+            .with(|conn| {
+                repo::search_filtered(
+                    conn,
+                    &comic_reader_lib::models::SearchFilter {
+                        query: "Chapter".into(),
+                        sort: "series".into(),
+                        cursor: cursor.clone(),
+                        limit: Some(2),
+                        ..Default::default()
+                    },
+                )
+            })
+            .unwrap();
+        assert!(page.issues.len() <= 2);
+        collected.extend(page.issues.iter().map(|issue| issue.id.clone()));
+        match page.next_cursor {
+            Some(next) if !page.issues.is_empty() => cursor = Some(next),
+            _ => break,
+        }
+    }
+    collected.sort();
+    collected.dedup();
+    assert_eq!(collected.len(), 5, "keyset paging must not skip or repeat rows");
+}
+
+#[test]
+fn search_records_recent_queries_and_filters() {
+    let (dir, db) = setup("search-filters");
+    let library_dir = dir.join("library");
+    std::fs::create_dir_all(&library_dir).unwrap();
+    write_cbz_with_info(&library_dir.join("Sonic 001.cbz"), 3, "Sonic", "1", "Fallout");
+    write_cbz_with_info(&library_dir.join("Sonic 002.cbz"), 3, "Sonic", "2", "Fallout Again");
+    db.with(|conn| library::import_root(conn, &library_dir)).unwrap();
+
+    let all = db
+        .with(|conn| {
+            repo::search_filtered(
+                conn,
+                &comic_reader_lib::models::SearchFilter {
+                    query: "Fallout".into(),
+                    ..Default::default()
+                },
+            )
+        })
+        .unwrap();
+    assert_eq!(all.issues.len(), 2);
+
+    let filtered = db
+        .with(|conn| {
+            repo::search_filtered(
+                conn,
+                &comic_reader_lib::models::SearchFilter {
+                    query: "Fallout".into(),
+                    publisher: Some("IDW Publishing".into()),
+                    year_from: Some(2018),
+                    year_to: Some(2018),
+                    ..Default::default()
+                },
+            )
+        })
+        .unwrap();
+    assert_eq!(filtered.issues.len(), 2);
+
+    let wrong_publisher = db
+        .with(|conn| {
+            repo::search_filtered(
+                conn,
+                &comic_reader_lib::models::SearchFilter {
+                    query: "Fallout".into(),
+                    publisher: Some("Marvel".into()),
+                    ..Default::default()
+                },
+            )
+        })
+        .unwrap();
+    assert!(wrong_publisher.issues.is_empty());
+
+    let recent = db.with(|conn| repo::recent_searches(conn)).unwrap();
+    assert_eq!(recent.first().map(|entry| entry.query.as_str()), Some("Fallout"));
+    db.with(|conn| repo::clear_search_history(conn)).unwrap();
+    assert!(db.with(|conn| repo::recent_searches(conn)).unwrap().is_empty());
+}
+
+#[test]
+fn filter_only_search_pages_and_sorts_without_a_text_query() {
+    let (dir, db) = setup("search-filter-only");
+    let library_dir = dir.join("library");
+    std::fs::create_dir_all(&library_dir).unwrap();
+    for number in 1..=4 {
+        write_cbz_with_info(
+            &library_dir.join(format!("Sonic {number:03}.cbz")),
+            3,
+            "Sonic",
+            &number.to_string(),
+            &format!("Chapter {number}"),
+        );
+    }
+    db.with(|conn| library::import_root(conn, &library_dir)).unwrap();
+
+    let mut collected = Vec::new();
+    let mut cursor: Option<String> = None;
+    for _ in 0..10 {
+        let page = db
+            .with(|conn| {
+                repo::search_filtered(
+                    conn,
+                    &comic_reader_lib::models::SearchFilter {
+                        query: String::new(),
+                        publisher: Some("IDW Publishing".into()),
+                        cursor: cursor.clone(),
+                        limit: Some(2),
+                        ..Default::default()
+                    },
+                )
+            })
+            .unwrap();
+        collected.extend(page.issues.iter().map(|issue| issue.id.clone()));
+        match page.next_cursor {
+            Some(next) if !page.issues.is_empty() => cursor = Some(next),
+            _ => break,
+        }
+    }
+    collected.sort();
+    collected.dedup();
+    assert_eq!(collected.len(), 4);
+}
+
+#[test]
+fn metadata_lock_protects_manual_edits_from_refresh_and_bulk_edits() {
+    let (dir, db) = setup("metadata-lock");
+    let library_dir = dir.join("library");
+    std::fs::create_dir_all(&library_dir).unwrap();
+    let archive = library_dir.join("Sonic 001.cbz");
+    write_cbz_with_info(&archive, 3, "Sonic the Hedgehog", "1", "Fallout");
+    db.with(|conn| library::import_root(conn, &library_dir)).unwrap();
+
+    let snapshot = db
+        .with(|conn| {
+            repo::library_snapshot(
+                conn,
+                &LibraryFilter {
+                    search: String::new(),
+                    universe: None,
+                    publisher: None,
+                    series_id: None,
+                    status: None,
+                    sort: "number".into(),
+                    descending: false,
+                },
+            )
+        })
+        .unwrap();
+    let issue_id = snapshot.issues[0].id.clone();
+    assert!(!snapshot.issues[0].metadata_locked);
+    assert!(!snapshot.series[0].metadata_locked);
+
+    let manual = IssuePatch {
+        description: Some("My own synopsis".into()),
+        ..Default::default()
+    };
+    let updated = db
+        .with(|conn| repo::update_issue(conn, &issue_id, &manual))
+        .unwrap();
+    assert!(updated.metadata_locked);
+    // Read the raw column: `repo::issue` applies spoiler filtering, which nulls
+    // the synopsis of an unread issue.
+    let stored: Option<String> = db
+        .with(|conn| {
+            conn.query_row(
+                "SELECT description FROM issues WHERE id = ?1",
+                [&issue_id],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+        })
+        .unwrap();
+    assert_eq!(stored.as_deref(), Some("My own synopsis"));
+
+    // An automatic refresh must not clobber a locked issue.
+    let refreshed = db
+        .with(|conn| repo::refresh_issue_metadata(conn, &issue_id, false))
+        .unwrap();
+    assert!(!refreshed);
+    let after: Option<String> = db
+        .with(|conn| {
+            conn.query_row(
+                "SELECT description FROM issues WHERE id = ?1",
+                [&issue_id],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+        })
+        .unwrap();
+    assert_eq!(after.as_deref(), Some("My own synopsis"));
+
+    // Bulk edits skip locked issues unless they are changing the lock itself.
+    let bulk = IssuePatch {
+        writer: Some("Someone Else".into()),
+        ..Default::default()
+    };
+    let changed = db
+        .with(|conn| repo::bulk_update(conn, std::slice::from_ref(&issue_id), &bulk))
+        .unwrap();
+    assert!(changed.is_empty());
+    let after = db.with(|conn| repo::issue(conn, &issue_id)).unwrap();
+    assert_eq!(after.writer.as_deref(), Some("Ian Flynn"));
+
+    // Unlocking allows an explicit refresh to restore embedded metadata.
+    let unlock = IssuePatch {
+        metadata_locked: Some(false),
+        ..Default::default()
+    };
+    let unlocked = db
+        .with(|conn| repo::update_issue(conn, &issue_id, &unlock))
+        .unwrap();
+    assert!(!unlocked.metadata_locked);
+    let refreshed = db
+        .with(|conn| repo::refresh_issue_metadata(conn, &issue_id, true))
+        .unwrap();
+    assert!(refreshed);
+    let after: Option<String> = db
+        .with(|conn| {
+            conn.query_row(
+                "SELECT description FROM issues WHERE id = ?1",
+                [&issue_id],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+        })
+        .unwrap();
+    assert_eq!(after.as_deref(), Some("A test issue for the reader."));
+
+    // Series edits lock the series too, and locked issues keep their universe.
+    let series_id = snapshot.series[0].id.clone();
+    let patch = comic_reader_lib::models::SeriesPatch {
+        universe: Some("Sonic".into()),
+        ..Default::default()
+    };
+    let detail = db
+        .with(|conn| repo::update_series(conn, &series_id, &patch))
+        .unwrap();
+    assert!(detail.summary.metadata_locked);
+    assert_eq!(detail.summary.universe.as_deref(), Some("Sonic"));
+}
+
+#[test]
+fn smart_collections_compile_typed_rules_and_reject_injection() {
+    use comic_reader_lib::models::{CollectionPatch, SmartRule, SmartRules};
+
+    let (dir, db) = setup("smart-collections");
+    let library_dir = dir.join("library");
+    std::fs::create_dir_all(&library_dir).unwrap();
+    write_cbz_with_info(
+        &library_dir.join("Sonic 001.cbz"),
+        3,
+        "Sonic the Hedgehog",
+        "1",
+        "Fallout",
+    );
+    write_cbz_with_info(
+        &library_dir.join("Sonic 002.cbz"),
+        3,
+        "Sonic the Hedgehog",
+        "2",
+        "The Fate of Dr. Eggman",
+    );
+    db.with(|conn| library::import_root(conn, &library_dir)).unwrap();
+
+    let rules = SmartRules {
+        all: vec![SmartRule {
+            field: "series".into(),
+            op: "contains".into(),
+            value: "sonic".into(),
+        }],
+        any: Vec::new(),
+    };
+    let collection = db
+        .with(|conn| {
+            repo::create_smart_collection(conn, "All Sonic", Some("rule test"), &rules, Some("series"))
+        })
+        .unwrap();
+    assert!(collection.is_smart);
+    assert_eq!(collection.item_count, 2);
+
+    let detail = db.with(|conn| repo::collection_detail(conn, &collection.id)).unwrap();
+    assert_eq!(detail.items.len(), 2);
+    // Sorted by series then number.
+    assert_eq!(detail.items[0].number, "1");
+    assert_eq!(detail.items[1].number, "2");
+
+    // `all` and `any` groups are combined with AND: narrowing by number keeps
+    // only #2 even though the `any` group would also admit it.
+    let combined = SmartRules {
+        all: vec![SmartRule {
+            field: "series".into(),
+            op: "contains".into(),
+            value: "sonic".into(),
+        }],
+        any: vec![SmartRule {
+            field: "number".into(),
+            op: "eq".into(),
+            value: "2".into(),
+        }],
+    };
+    db.with(|conn| {
+        repo::update_collection(
+            conn,
+            &collection.id,
+            &CollectionPatch {
+                smart_rules: Some(combined),
+                ..Default::default()
+            },
+        )
+    })
+    .unwrap();
+    let detail = db.with(|conn| repo::collection_detail(conn, &collection.id)).unwrap();
+    assert_eq!(detail.items.len(), 1);
+    assert_eq!(detail.items[0].number, "2");
+
+    // Rules track the catalog instead of a stored item list.
+    let narrowed = SmartRules {
+        all: vec![SmartRule {
+            field: "title".into(),
+            op: "contains".into(),
+            value: "eggman".into(),
+        }],
+        any: Vec::new(),
+    };
+    db.with(|conn| {
+        repo::update_collection(
+            conn,
+            &collection.id,
+            &CollectionPatch {
+                smart_rules: Some(narrowed),
+                ..Default::default()
+            },
+        )
+    })
+    .unwrap();
+    let detail = db.with(|conn| repo::collection_detail(conn, &collection.id)).unwrap();
+    assert_eq!(detail.items.len(), 1);
+    assert_eq!(detail.items[0].number, "2");
+
+    // Arbitrary fields and operators never reach SQL.
+    let injection = SmartRules {
+        all: vec![SmartRule {
+            field: "title = title OR 1=1; --".into(),
+            op: "eq".into(),
+            value: "x".into(),
+        }],
+        any: Vec::new(),
+    };
+    let result = db.with(|conn| {
+        repo::create_smart_collection(conn, "Injection", None, &injection, None)
+    });
+    assert!(result.is_err());
+
+    let bad_op = SmartRules {
+        all: vec![SmartRule {
+            field: "title".into(),
+            op: "union select".into(),
+            value: "x".into(),
+        }],
+        any: Vec::new(),
+    };
+    assert!(db
+        .with(|conn| repo::create_smart_collection(conn, "Injection", None, &bad_op, None))
+        .is_err());
+
+    // Empty rules match nothing rather than the whole library.
+    let empty = db
+        .with(|conn| {
+            repo::create_smart_collection(conn, "Empty", None, &SmartRules::default(), None)
+        })
+        .unwrap();
+    assert_eq!(empty.item_count, 0);
+    let detail = db.with(|conn| repo::collection_detail(conn, &empty.id)).unwrap();
+    assert!(detail.items.is_empty());
+
+    // Search's collection filter understands smart collections too.
+    let results = db
+        .with(|conn| {
+            repo::search_filtered(
+                conn,
+                &comic_reader_lib::models::SearchFilter {
+                    query: String::new(),
+                    publisher: None,
+                    series_id: None,
+                    universe: None,
+                    status: None,
+                    format: None,
+                    year_from: None,
+                    year_to: None,
+                    collection_id: Some(collection.id.clone()),
+                    sort: "series".into(),
+                    cursor: None,
+                    limit: Some(20),
+                },
+            )
+        })
+        .unwrap();
+    assert_eq!(results.issues.len(), 1);
+    assert_eq!(results.issues[0].number, "2");
+}
+
+#[test]
+fn unmatched_files_stay_readable_and_match_without_losing_progress() {
+    use comic_reader_lib::models::{ImportOverride, MatchFilePatch};
+
+    let (dir, db) = setup("unmatched");
+    let library_dir = dir.join("library");
+    std::fs::create_dir_all(&library_dir).unwrap();
+    write_cbz_with_info(&library_dir.join("Sonic 001.cbz"), 4, "Sonic", "1", "Issue 1");
+    write_cbz(&library_dir.join("Loose Scan.cbz"), 6, false);
+
+    // Import the Sonic issue normally and keep the other file unmatched.
+    let overrides = vec![ImportOverride {
+        relative_path: "Loose Scan.cbz".into(),
+        keep_unmatched: Some(true),
+        ..Default::default()
+    }];
+    let result = db
+        .with(|conn| library::commit_import(conn, &library_dir, &library::ImportControl::new(), &overrides, |_| {}))
+        .unwrap();
+    assert_eq!(result.files_imported, 2);
+    assert_eq!(result.issues_created, 1);
+
+    let unmatched = db.with(|conn| repo::unmatched_files(conn)).unwrap();
+    assert_eq!(unmatched.len(), 1);
+    let file = &unmatched[0];
+    assert_eq!(file.relative_path, "Loose Scan.cbz");
+    assert_eq!(file.page_count, 6);
+    assert_eq!(file.suggested_series, "Loose Scan");
+    assert_eq!(file.progress_status, "unread");
+
+    // It reads through the file-scoped reader path and keeps its own progress.
+    let reader = db.with(|conn| repo::file_reader_payload(conn, &file.id)).unwrap();
+    assert!(reader.issue_id.is_none());
+    assert_eq!(reader.pages.len(), 6);
+    let progress = db
+        .with(|conn| repo::save_file_progress(conn, &file.id, 3, Some(0.25)))
+        .unwrap();
+    assert_eq!(progress.page, 3);
+    assert_eq!(progress.status, "in-progress");
+    assert_eq!(progress.scroll_offset, 0.25);
+    let bookmark = db
+        .with(|conn| repo::add_file_bookmark(conn, &file.id, 3, Some("Mark"), Some("note")))
+        .unwrap();
+    assert!(bookmark.get("id").is_some());
+
+    // Matching creates the issue but reuses the same file row and moves the
+    // progress/bookmark from file scope to the issue.
+    let patch = MatchFilePatch {
+        series_title: Some("Loose Scan".into()),
+        number: Some("7".into()),
+        title: Some("Loose Scan #7".into()),
+        ..Default::default()
+    };
+    let issue = db
+        .with(|conn| repo::match_file_to_new_issue(conn, &file.id, &patch))
+        .unwrap();
+    assert_eq!(issue.file_id.as_deref(), Some(file.id.as_str()));
+    assert_eq!(issue.number, "7");
+    assert_eq!(issue.page_count, 6);
+    assert_eq!(issue.last_page, 3);
+    assert_eq!(issue.status, "in-progress");
+    assert!(db.with(|conn| repo::unmatched_files(conn)).unwrap().is_empty());
+    let marks = db.with(|conn| repo::bookmarks(conn, &issue.id)).unwrap();
+    assert_eq!(marks.len(), 1);
+    let file_marks = db.with(|conn| repo::file_bookmarks(conn, &file.id)).unwrap();
+    assert!(file_marks.is_empty());
+    let file_progress = db.with(|conn| repo::file_progress(conn, &file.id)).unwrap();
+    assert_eq!(file_progress.page, 0);
+
+    // A second match attempt on the same file is rejected.
+    let again = db.with(|conn| repo::match_file_to_new_issue(conn, &file.id, &patch));
+    assert!(again.is_err());
+
+    // Matching to an existing fileless issue moves the file record too.
+    write_cbz(&library_dir.join("Loose Annual.cbz"), 3, false);
+    let overrides = vec![ImportOverride {
+        relative_path: "Loose Annual.cbz".into(),
+        keep_unmatched: Some(true),
+        ..Default::default()
+    }];
+    db.with(|conn| library::commit_import(conn, &library_dir, &library::ImportControl::new(), &overrides, |_| {}))
+        .unwrap();
+    let unmatched = db.with(|conn| repo::unmatched_files(conn)).unwrap();
+    assert_eq!(unmatched.len(), 1);
+    let annual = &unmatched[0];
+    db.with(|conn| repo::save_file_progress(conn, &annual.id, 2, None))
+        .unwrap();
+    let fileless = db.with(|conn| repo::fileless_issues(conn)).unwrap();
+    assert_eq!(fileless.len(), 0);
+
+    // A fileless issue can adopt the annual, preserving its file progress.
+    let series = db
+        .with(|conn| repo::create_series(conn, "Annuals", None, None))
+        .unwrap();
+    db.with(|conn| {
+            conn.execute(
+                "INSERT INTO issues (id, file_id, series_id, title, number, sort_number,
+                    created_at, updated_at)
+                 VALUES ('fileless-annual', NULL, ?1, 'Annual 2020', '2020', 2020,
+                    ?2, ?2)",
+                rusqlite::params![series.summary.id, "2026-01-01T00:00:00Z"],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(db.with(|conn| repo::fileless_issues(conn)).unwrap().len(), 1);
+    let matched = db
+        .with(|conn| repo::match_file_to_existing_issue(conn, &annual.id, "fileless-annual"))
+        .unwrap();
+    assert_eq!(matched.file_id.as_deref(), Some(annual.id.as_str()));
+    assert_eq!(matched.last_page, 2);
+    assert_eq!(matched.series_title.as_deref(), Some("Annuals"));
+    assert!(db.with(|conn| repo::unmatched_files(conn)).unwrap().is_empty());
+    assert!(db.with(|conn| repo::fileless_issues(conn)).unwrap().is_empty());
+}

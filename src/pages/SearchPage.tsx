@@ -1,11 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { Cover, EmptyState, Modal, Spinner, StatusBadge } from "../components/ui";
 import { Icon } from "../components/Icon";
 import { cx, formatDate, progressRatio } from "../lib/utils";
 import { useToast } from "../components/Toast";
+import type { SearchFilter, SearchResult } from "../lib/types";
 
 export default function SearchPage() {
   const [params, setParams] = useSearchParams();
@@ -14,6 +15,14 @@ export default function SearchPage() {
   const [debounced, setDebounced] = useState(initial);
   const [saveOpen, setSaveOpen] = useState(false);
   const [saveName, setSaveName] = useState("");
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [publisher, setPublisher] = useState("");
+  const [seriesId, setSeriesId] = useState("");
+  const [status, setStatus] = useState("");
+  const [format, setFormat] = useState("");
+  const [yearFrom, setYearFrom] = useState("");
+  const [yearTo, setYearTo] = useState("");
+  const [sort, setSort] = useState("relevance");
   const toast = useToast();
   const queryClient = useQueryClient();
 
@@ -27,9 +36,30 @@ export default function SearchPage() {
     else setParams({}, { replace: true });
   }, [debounced, setParams]);
 
-  const results = useQuery({
-    queryKey: ["search", debounced],
-    queryFn: () => api.search(debounced, 120),
+  const options = useQuery({ queryKey: ["filter-options"], queryFn: api.filterOptions });
+  const recent = useQuery({ queryKey: ["recent-searches"], queryFn: api.recentSearches });
+
+  const activeFilters = useMemo(() => {
+    const filter: SearchFilter = { query: debounced.trim(), sort, limit: 40 };
+    if (publisher) filter.publisher = publisher;
+    if (seriesId) filter.seriesId = seriesId;
+    if (status) filter.status = status;
+    if (format) filter.format = format;
+    if (yearFrom) filter.yearFrom = Number(yearFrom);
+    if (yearTo) filter.yearTo = Number(yearTo);
+    return filter;
+  }, [debounced, publisher, seriesId, status, format, yearFrom, yearTo, sort]);
+
+  const filterCount = [publisher, seriesId, status, format, yearFrom || yearTo].filter(
+    Boolean,
+  ).length;
+
+  const results = useInfiniteQuery({
+    queryKey: ["search", activeFilters],
+    queryFn: ({ pageParam }) =>
+      api.searchFiltered({ ...activeFilters, cursor: pageParam ?? null }),
+    initialPageParam: null as string | null,
+    getNextPageParam: (last: SearchResult) => last.nextCursor,
     enabled: debounced.trim().length > 0,
   });
 
@@ -41,9 +71,24 @@ export default function SearchPage() {
 
   const saved = useQuery({ queryKey: ["saved-searches"], queryFn: api.savedSearches });
 
-  const issues = results.data?.issues ?? [];
-  const series = results.data?.series ?? [];
+  const issues = useMemo(
+    () => results.data?.pages.flatMap((page) => page.issues) ?? [],
+    [results.data],
+  );
+  const series = results.data?.pages[0]?.series ?? [];
+  const snippets = useMemo(() => {
+    const merged: Record<string, string> = {};
+    for (const page of results.data?.pages ?? []) {
+      Object.assign(merged, page.snippets);
+    }
+    return merged;
+  }, [results.data]);
   const total = issues.length + series.length;
+
+  useEffect(() => {
+    if (!results.isSuccess) return;
+    void queryClient.invalidateQueries({ queryKey: ["recent-searches"] });
+  }, [results.isSuccess, results.data?.pages.length, queryClient]);
 
   return (
     <div className="mx-auto w-full max-w-[1200px] px-6 py-6">
@@ -67,6 +112,18 @@ export default function SearchPage() {
           />
         </div>
         <button
+          className={cx("btn", filterCount > 0 && "border-[var(--accent)]/50 text-[var(--accent)]")}
+          onClick={() => setFiltersOpen((current) => !current)}
+          aria-expanded={filtersOpen}
+        >
+          <Icon name="filter" className="size-3.5" /> Filters
+          {filterCount > 0 && (
+            <span className="rounded-full bg-[var(--accent)] px-1.5 text-[10px] font-semibold text-black">
+              {filterCount}
+            </span>
+          )}
+        </button>
+        <button
           className="btn"
           disabled={!debounced.trim()}
           onClick={() => {
@@ -77,6 +134,153 @@ export default function SearchPage() {
           <Icon name="star" className="size-3.5" /> Save search
         </button>
       </div>
+
+      {filtersOpen && (
+        <div className="mt-3 rounded-xl border border-[var(--line)] bg-[var(--surface-1)] p-3">
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
+            <label>
+              <span className="label">Publisher</span>
+              <select
+                className="input h-8 text-xs"
+                value={publisher}
+                onChange={(event) => setPublisher(event.currentTarget.value)}
+              >
+                <option value="">Any</option>
+                {(options.data?.publishers ?? []).map((entry) => (
+                  <option key={entry} value={entry}>
+                    {entry}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span className="label">Series</span>
+              <select
+                className="input h-8 text-xs"
+                value={seriesId}
+                onChange={(event) => setSeriesId(event.currentTarget.value)}
+              >
+                <option value="">Any</option>
+                {(options.data?.series ?? []).map((entry) => (
+                  <option key={entry.id} value={entry.id}>
+                    {entry.title}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span className="label">Status</span>
+              <select
+                className="input h-8 text-xs"
+                value={status}
+                onChange={(event) => setStatus(event.currentTarget.value)}
+              >
+                <option value="">Any</option>
+                <option value="unread">Unread</option>
+                <option value="in-progress">In progress</option>
+                <option value="completed">Completed</option>
+              </select>
+            </label>
+            <label>
+              <span className="label">Format</span>
+              <select
+                className="input h-8 text-xs"
+                value={format}
+                onChange={(event) => setFormat(event.currentTarget.value)}
+              >
+                <option value="">Any</option>
+                {(options.data?.formats ?? []).map((entry) => (
+                  <option key={entry} value={entry}>
+                    {entry.toUpperCase()}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span className="label">Year from</span>
+              <input
+                className="input h-8 text-xs"
+                inputMode="numeric"
+                placeholder={options.data?.yearMin?.toString() ?? ""}
+                value={yearFrom}
+                onChange={(event) =>
+                  setYearFrom(event.currentTarget.value.replace(/[^0-9]/g, ""))
+                }
+              />
+            </label>
+            <label>
+              <span className="label">Year to</span>
+              <input
+                className="input h-8 text-xs"
+                inputMode="numeric"
+                placeholder={options.data?.yearMax?.toString() ?? ""}
+                value={yearTo}
+                onChange={(event) =>
+                  setYearTo(event.currentTarget.value.replace(/[^0-9]/g, ""))
+                }
+              />
+            </label>
+          </div>
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <label className="flex items-center gap-2 text-[11px] text-muted">
+              Sort
+              <select
+                className="input h-7 w-auto text-xs"
+                value={sort}
+                onChange={(event) => setSort(event.currentTarget.value)}
+              >
+                <option value="relevance">Relevance</option>
+                <option value="series">Series and number</option>
+                <option value="title">Title</option>
+                <option value="recent">Recently read</option>
+              </select>
+            </label>
+            {filterCount > 0 && (
+              <button
+                className="btn btn-sm btn-ghost"
+                onClick={() => {
+                  setPublisher("");
+                  setSeriesId("");
+                  setStatus("");
+                  setFormat("");
+                  setYearFrom("");
+                  setYearTo("");
+                }}
+              >
+                Clear filters
+              </button>
+            )}
+            <span className="ml-auto text-[10px] text-muted">
+              Filters combine with the text query. Snippets are hidden for spoiler-protected
+              issues.
+            </span>
+          </div>
+        </div>
+      )}
+
+      {recent.data && recent.data.length > 0 && !debounced.trim() && (
+        <div className="mt-4 flex flex-wrap items-center gap-1.5">
+          <span className="text-[11px] uppercase tracking-wider text-muted">Recent</span>
+          {recent.data.map((entry) => (
+            <button
+              key={entry.query}
+              className="chip hover:border-[var(--line-strong)]"
+              onClick={() => setQuery(entry.query)}
+            >
+              {entry.query}
+            </button>
+          ))}
+          <button
+            className="btn btn-ghost btn-sm ml-auto"
+            onClick={async () => {
+              await api.clearSearchHistory();
+              await queryClient.invalidateQueries({ queryKey: ["recent-searches"] });
+            }}
+          >
+            Clear
+          </button>
+        </div>
+      )}
 
       {suggestions.data && suggestions.data.length > 0 && query !== debounced && (
         <div className="mt-2 flex flex-wrap gap-1.5">
@@ -128,6 +332,13 @@ export default function SearchPage() {
           <div className="grid h-40 place-items-center">
             <Spinner />
           </div>
+        )}
+
+        {results.isError && (
+          <EmptyState
+            title="Search failed"
+            body={String(results.error)}
+          />
         )}
 
         {debounced.trim() && results.isSuccess && total === 0 && (
@@ -202,6 +413,11 @@ export default function SearchPage() {
                         .filter(Boolean)
                         .join(" · ")}
                     </p>
+                    {snippets[issue.id] && (
+                      <p className="mt-0.5 line-clamp-2 text-[11px] text-[var(--text)]/80">
+                        {snippets[issue.id]}
+                      </p>
+                    )}
                   </div>
                   <span
                     className={cx(
@@ -215,6 +431,19 @@ export default function SearchPage() {
               ))}
             </div>
           </section>
+        )}
+
+        {results.hasNextPage && (
+          <div className="mt-4 flex justify-center">
+            <button
+              className="btn"
+              onClick={() => void results.fetchNextPage()}
+              disabled={results.isFetchingNextPage}
+            >
+              {results.isFetchingNextPage ? <Spinner className="size-3.5" /> : null}
+              Load more results
+            </button>
+          </div>
         )}
       </div>
 

@@ -5,6 +5,8 @@ import type { Settings } from "../lib/types";
 const DEFAULT_SETTINGS: Settings = {
   background: "#0b0c10",
   pageSpacing: 16,
+  brightness: 1,
+  gamma: 1,
   readingDirection: "ltr",
   defaultMode: "single",
   defaultFit: "page",

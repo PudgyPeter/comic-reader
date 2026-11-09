@@ -1,14 +1,21 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { api } from "../lib/api";
+import { api, MOCK_MODE } from "../lib/api";
 import { Cover, EmptyState, Modal, Spinner } from "../components/ui";
 import { Icon } from "../components/Icon";
 import { pluralize } from "../lib/utils";
 import { useToast } from "../components/Toast";
+import { EMPTY_RULES, SmartRulesEditor } from "../components/SmartRulesEditor";
+import type { CollectionSortMode, SmartRules } from "../lib/types";
 
 export default function CollectionsPage() {
   const [creating, setCreating] = useState(false);
+  // Mock-harness affordance: ?mock&smart opens the smart-collection builder so
+  // screenshots do not have to drive a click.
+  const [smartCreating, setSmartCreating] = useState(
+    () => MOCK_MODE && new URLSearchParams(window.location.search).has("smart"),
+  );
   const toast = useToast();
   const queryClient = useQueryClient();
   const query = useQuery({ queryKey: ["collections"], queryFn: api.collections });
@@ -17,6 +24,9 @@ export default function CollectionsPage() {
     name: string;
     description: string;
     coverFileId: string | null;
+    isSmart: boolean;
+    smartRules: SmartRules;
+    sortMode: CollectionSortMode;
   } | null>(null);
 
   const coverOptions = useQuery({
@@ -34,9 +44,14 @@ export default function CollectionsPage() {
             Personal groupings that can overlap. Favourites, arcs, or reading piles.
           </p>
         </div>
-        <button className="btn btn-sm btn-primary" onClick={() => setCreating(true)}>
-          <Icon name="plus" className="size-3.5" /> New collection
-        </button>
+        <div className="flex gap-2">
+          <button className="btn btn-sm" onClick={() => setCreating(true)}>
+            <Icon name="plus" className="size-3.5" /> New collection
+          </button>
+          <button className="btn btn-sm btn-primary" onClick={() => setSmartCreating(true)}>
+            <Icon name="filter" className="size-3.5" /> New smart collection
+          </button>
+        </div>
       </div>
 
       {query.isLoading && (
@@ -89,7 +104,12 @@ export default function CollectionsPage() {
                 )}
               </div>
               <div className="min-w-0 flex-1 py-0.5">
-                <p className="truncate text-sm font-medium">{collection.name}</p>
+                <p className="truncate text-sm font-medium">
+                  {collection.name}
+                  {collection.isSmart && (
+                    <span className="chip chip-accent ml-1.5 align-middle text-[9px]">Smart</span>
+                  )}
+                </p>
                 <p className="mt-0.5 line-clamp-2 text-[11px] leading-relaxed text-muted">
                   {collection.description || "No description"}
                 </p>
@@ -108,6 +128,9 @@ export default function CollectionsPage() {
                     name: collection.name,
                     description: collection.description ?? "",
                     coverFileId: collection.coverFileId,
+                    isSmart: collection.isSmart,
+                    smartRules: collection.smartRules ?? EMPTY_RULES,
+                    sortMode: collection.sortMode,
                   })
                 }
               >
@@ -141,9 +164,20 @@ export default function CollectionsPage() {
         }}
       />
 
+      <SmartCollectionForm
+        open={smartCreating}
+        onClose={() => setSmartCreating(false)}
+        onSubmit={async (name, description, rules, sortMode) => {
+          await api.createSmartCollection(name, description || undefined, rules, sortMode);
+          await queryClient.invalidateQueries({ queryKey: ["collections"] });
+          setSmartCreating(false);
+          toast.push("Smart collection created", "success");
+        }}
+      />
+
       <Modal
         open={Boolean(editing)}
-        title="Edit collection"
+        title={editing?.isSmart ? "Edit smart collection" : "Edit collection"}
         onClose={() => setEditing(null)}
         footer={
           <>
@@ -154,12 +188,13 @@ export default function CollectionsPage() {
               className="btn btn-primary"
               onClick={async () => {
                 if (!editing) return;
-                await api.updateCollection(
-                  editing.id,
-                  editing.name,
-                  editing.description,
-                  editing.coverFileId ?? undefined,
-                );
+                await api.updateCollection(editing.id, {
+                  name: editing.name,
+                  description: editing.description,
+                  coverFileId: editing.coverFileId ?? undefined,
+                  smartRules: editing.isSmart ? editing.smartRules : undefined,
+                  sortMode: editing.sortMode,
+                });
                 await queryClient.invalidateQueries({ queryKey: ["collections"] });
                 await queryClient.invalidateQueries({ queryKey: ["collection", editing.id] });
                 setEditing(null);
@@ -225,6 +260,35 @@ export default function CollectionsPage() {
                 </div>
               </div>
             </label>
+            <label>
+              <span className="label">Sort order</span>
+              <select
+                className="input h-8 text-xs"
+                value={editing.sortMode}
+                disabled={!editing.isSmart}
+                onChange={(event) =>
+                  setEditing({
+                    ...editing,
+                    sortMode: event.currentTarget.value as CollectionSortMode,
+                  })
+                }
+              >
+                <option value="manual">Manual (stored order)</option>
+                <option value="series">Series, then issue number</option>
+                <option value="title">Title</option>
+                <option value="release_date">Release date</option>
+                <option value="added_desc">Recently added first</option>
+                <option value="added_asc">Oldest added first</option>
+              </select>
+            </label>
+            {editing.isSmart && (
+              <div className="rounded-lg border border-[var(--line)] bg-[var(--surface-1)] p-3">
+                <SmartRulesEditor
+                  rules={editing.smartRules}
+                  onChange={(smartRules) => setEditing({ ...editing, smartRules })}
+                />
+              </div>
+            )}
           </div>
         )}
       </Modal>
@@ -290,6 +354,106 @@ export function CollectionForm({
             placeholder="Why these issues belong together"
           />
         </label>
+      </div>
+    </Modal>
+  );
+}
+
+function SmartCollectionForm({
+  open,
+  onClose,
+  onSubmit,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onSubmit: (
+    name: string,
+    description: string,
+    rules: SmartRules,
+    sortMode: CollectionSortMode,
+  ) => Promise<void>;
+}) {
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [rules, setRules] = useState<SmartRules>({ all: [], any: [] });
+  const [sortMode, setSortMode] = useState<CollectionSortMode>("series");
+  const [busy, setBusy] = useState(false);
+  const ruleCount = rules.all.length + rules.any.length;
+
+  return (
+    <Modal
+      open={open}
+      title="New smart collection"
+      onClose={onClose}
+      width="max-w-2xl"
+      footer={
+        <>
+          <button className="btn" onClick={onClose}>
+            Cancel
+          </button>
+          <button
+            className="btn btn-primary"
+            disabled={!name.trim() || ruleCount === 0 || busy}
+            onClick={async () => {
+              setBusy(true);
+              try {
+                await onSubmit(name.trim(), description.trim(), rules, sortMode);
+                setName("");
+                setDescription("");
+                setRules({ all: [], any: [] });
+                setSortMode("series");
+              } finally {
+                setBusy(false);
+              }
+            }}
+          >
+            Create smart collection
+          </button>
+        </>
+      }
+    >
+      <div className="space-y-3">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <label>
+            <span className="label">Name</span>
+            <input
+              className="input"
+              value={name}
+              onChange={(event) => setName(event.currentTarget.value)}
+              placeholder="Unread IDW Sonic"
+              autoFocus
+            />
+          </label>
+          <label>
+            <span className="label">Sort order</span>
+            <select
+              className="input h-[2.1rem] text-xs"
+              value={sortMode}
+              onChange={(event) => setSortMode(event.currentTarget.value as CollectionSortMode)}
+            >
+              <option value="series">Series, then issue number</option>
+              <option value="title">Title</option>
+              <option value="release_date">Release date</option>
+              <option value="added_desc">Recently added first</option>
+              <option value="added_asc">Oldest added first</option>
+            </select>
+          </label>
+        </div>
+        <label>
+          <span className="label">Description</span>
+          <input
+            className="input"
+            value={description}
+            onChange={(event) => setDescription(event.currentTarget.value)}
+            placeholder="Optional"
+          />
+        </label>
+        <SmartRulesEditor rules={rules} onChange={setRules} />
+        {ruleCount === 0 && (
+          <p className="text-[10px] text-amber-300">
+            Add at least one rule — an empty rule set deliberately matches no issues.
+          </p>
+        )}
       </div>
     </Modal>
   );

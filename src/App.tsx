@@ -16,6 +16,7 @@ const SearchPage = lazy(() => import("./pages/SearchPage"));
 const StatsPage = lazy(() => import("./pages/StatsPage"));
 const HistoryPage = lazy(() => import("./pages/HistoryPage"));
 const SettingsPage = lazy(() => import("./pages/SettingsPage"));
+const UnmatchedPage = lazy(() => import("./pages/UnmatchedPage"));
 
 function Themed() {
   const settings = useSettings((state) => state.settings);
@@ -55,10 +56,12 @@ export default function App() {
       >
         <Routes>
           <Route path="reader/:issueId" element={<ReaderPage />} />
+          <Route path="file/:fileId" element={<ReaderPage />} />
           <Route element={<AppShell />}>
             <Route index element={<LibraryPage />} />
             <Route path="series" element={<SeriesPage />} />
             <Route path="series/:seriesId" element={<SeriesDetailPage />} />
+            <Route path="unmatched" element={<UnmatchedPage />} />
             <Route path="collections" element={<CollectionsPage />} />
             <Route path="collections/:collectionId" element={<CollectionDetailPage />} />
             <Route path="orders" element={<OrdersPage />} />

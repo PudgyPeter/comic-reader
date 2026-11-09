@@ -5,7 +5,7 @@ use rusqlite::Connection;
 
 use crate::error::{AppError, AppResult};
 
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 9;
 
 pub struct Database {
     conn: Mutex<Connection>,
@@ -64,6 +64,21 @@ impl Database {
             }
             if version < 4 {
                 conn.execute_batch(MIGRATION_4)?;
+            }
+            if version < 5 {
+                conn.execute_batch(MIGRATION_5)?;
+            }
+            if version < 6 {
+                conn.execute_batch(MIGRATION_6)?;
+            }
+            if version < 7 {
+                conn.execute_batch(MIGRATION_7)?;
+            }
+            if version < 8 {
+                conn.execute_batch(MIGRATION_8)?;
+            }
+            if version < 9 {
+                conn.execute_batch(MIGRATION_9)?;
             }
             if version < SCHEMA_VERSION {
                 conn.execute(
@@ -249,6 +264,156 @@ CREATE TABLE IF NOT EXISTS missing_issues (
     updated_at TEXT NOT NULL,
     PRIMARY KEY (series_id, number)
 );
+"#;
+
+const MIGRATION_5: &str = r#"
+ALTER TABLE progress ADD COLUMN scroll_offset REAL NOT NULL DEFAULT 0;
+ALTER TABLE reading_sessions ADD COLUMN last_page INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE reading_sessions ADD COLUMN status TEXT NOT NULL DEFAULT 'closed';
+ALTER TABLE reading_sessions ADD COLUMN resumed_at TEXT;
+CREATE INDEX IF NOT EXISTS idx_sessions_status ON reading_sessions(status, ended_at);
+"#;
+
+const MIGRATION_6: &str = r#"
+CREATE VIRTUAL TABLE IF NOT EXISTS issue_fts USING fts5(
+    issue_id UNINDEXED,
+    title,
+    series,
+    number,
+    creator,
+    publisher,
+    description,
+    notes,
+    tokenize = 'unicode61 remove_diacritics 2'
+);
+
+CREATE TRIGGER IF NOT EXISTS issue_fts_ai AFTER INSERT ON issues BEGIN
+    INSERT INTO issue_fts (issue_id, title, series, number, creator, publisher, description, notes)
+    VALUES (
+        new.id,
+        coalesce(new.title, ''),
+        coalesce((SELECT title FROM series WHERE id = new.series_id), ''),
+        coalesce(new.number, ''),
+        trim(coalesce(new.writer, '') || ' ' || coalesce(new.artist, '') || ' ' || coalesce(new.cover_artist, '')),
+        coalesce(new.publisher, ''),
+        coalesce(new.description, ''),
+        ''
+    );
+END;
+
+CREATE TRIGGER IF NOT EXISTS issue_fts_ad AFTER DELETE ON issues BEGIN
+    DELETE FROM issue_fts WHERE issue_id = old.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS issue_fts_au AFTER UPDATE ON issues BEGIN
+    DELETE FROM issue_fts WHERE issue_id = old.id;
+    INSERT INTO issue_fts (issue_id, title, series, number, creator, publisher, description, notes)
+    VALUES (
+        new.id,
+        coalesce(new.title, ''),
+        coalesce((SELECT title FROM series WHERE id = new.series_id), ''),
+        coalesce(new.number, ''),
+        trim(coalesce(new.writer, '') || ' ' || coalesce(new.artist, '') || ' ' || coalesce(new.cover_artist, '')),
+        coalesce(new.publisher, ''),
+        coalesce(new.description, ''),
+        coalesce((SELECT group_concat(coalesce(label, '') || ' ' || coalesce(note, ''), ' ')
+                  FROM bookmarks WHERE issue_id = new.id), '')
+    );
+END;
+
+CREATE TRIGGER IF NOT EXISTS series_fts_au AFTER UPDATE OF title ON series BEGIN
+    DELETE FROM issue_fts WHERE issue_id IN (SELECT id FROM issues WHERE series_id = new.id);
+    INSERT INTO issue_fts (issue_id, title, series, number, creator, publisher, description, notes)
+    SELECT i.id, coalesce(i.title, ''), coalesce(new.title, ''), coalesce(i.number, ''),
+           trim(coalesce(i.writer, '') || ' ' || coalesce(i.artist, '') || ' ' || coalesce(i.cover_artist, '')),
+           coalesce(i.publisher, ''), coalesce(i.description, ''),
+           coalesce((SELECT group_concat(coalesce(label, '') || ' ' || coalesce(note, ''), ' ')
+                     FROM bookmarks WHERE issue_id = i.id), '')
+    FROM issues i WHERE i.series_id = new.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS bookmark_fts_ai AFTER INSERT ON bookmarks BEGIN
+    UPDATE issue_fts SET notes = (
+        SELECT group_concat(coalesce(label, '') || ' ' || coalesce(note, ''), ' ')
+        FROM bookmarks WHERE issue_id = new.issue_id
+    ) WHERE issue_id = new.issue_id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS bookmark_fts_ad AFTER DELETE ON bookmarks BEGIN
+    UPDATE issue_fts SET notes = coalesce((
+        SELECT group_concat(coalesce(label, '') || ' ' || coalesce(note, ''), ' ')
+        FROM bookmarks WHERE issue_id = old.issue_id
+    ), '') WHERE issue_id = old.issue_id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS bookmark_fts_au AFTER UPDATE OF label, note ON bookmarks BEGIN
+    UPDATE issue_fts SET notes = (
+        SELECT group_concat(coalesce(label, '') || ' ' || coalesce(note, ''), ' ')
+        FROM bookmarks WHERE issue_id = new.issue_id
+    ) WHERE issue_id = new.issue_id;
+END;
+
+-- Backfill existing rows so upgraded libraries are searchable immediately.
+INSERT INTO issue_fts (issue_id, title, series, number, creator, publisher, description, notes)
+SELECT i.id, coalesce(i.title, ''), coalesce(s.title, ''), coalesce(i.number, ''),
+       trim(coalesce(i.writer, '') || ' ' || coalesce(i.artist, '') || ' ' || coalesce(i.cover_artist, '')),
+       coalesce(i.publisher, ''), coalesce(i.description, ''),
+       coalesce((SELECT group_concat(coalesce(b.label, '') || ' ' || coalesce(b.note, ''), ' ')
+                 FROM bookmarks b WHERE b.issue_id = i.id), '')
+FROM issues i LEFT JOIN series s ON s.id = i.series_id
+WHERE NOT EXISTS (SELECT 1 FROM issue_fts f WHERE f.issue_id = i.id);
+
+CREATE TABLE IF NOT EXISTS recent_searches (
+    query TEXT PRIMARY KEY,
+    searched_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_recent_searches_time ON recent_searches(searched_at DESC);
+"#;
+
+const MIGRATION_7: &str = r#"
+ALTER TABLE issues ADD COLUMN metadata_locked INTEGER NOT NULL DEFAULT 0
+    CHECK (metadata_locked IN (0, 1));
+ALTER TABLE series ADD COLUMN metadata_locked INTEGER NOT NULL DEFAULT 0
+    CHECK (metadata_locked IN (0, 1));
+"#;
+
+const MIGRATION_8: &str = r#"
+ALTER TABLE collections ADD COLUMN is_smart INTEGER NOT NULL DEFAULT 0
+    CHECK (is_smart IN (0, 1));
+ALTER TABLE collections ADD COLUMN smart_rules TEXT;
+ALTER TABLE collections ADD COLUMN sort_mode TEXT NOT NULL DEFAULT 'manual'
+    CHECK (sort_mode IN ('manual', 'title', 'series', 'added_desc', 'added_asc', 'release_date'));
+"#;
+
+// Unmatched files are library_files rows with no issue pointing at them. Their
+// progress and bookmarks live at file scope so they survive indexing, and a
+// later "match to issue" moves these rows into the issue-scoped tables instead
+// of recreating the file record (ARCHITECTURE.md §10.7).
+const MIGRATION_9: &str = r#"
+CREATE TABLE IF NOT EXISTS file_progress (
+    file_id TEXT PRIMARY KEY REFERENCES library_files(id) ON DELETE CASCADE,
+    page INTEGER NOT NULL DEFAULT 0,
+    total INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'unread'
+        CHECK (status IN ('unread', 'in-progress', 'completed')),
+    started_at TEXT,
+    completed_at TEXT,
+    last_read_at TEXT,
+    updated_at TEXT NOT NULL,
+    scroll_offset REAL NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS file_bookmarks (
+    id TEXT PRIMARY KEY,
+    file_id TEXT NOT NULL REFERENCES library_files(id) ON DELETE CASCADE,
+    page INTEGER NOT NULL,
+    label TEXT,
+    note TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_file_bookmarks_file ON file_bookmarks(file_id);
 "#;
 
 pub fn now() -> String {

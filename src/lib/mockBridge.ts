@@ -20,7 +20,47 @@ const state = {
   bookmarks: {} as Record<string, Json[]>,
   progress: {} as Record<string, Json>,
   reveals: new Set<string>(),
+  fileBookmarks: {} as Record<string, Json[]>,
+  fileProgress: {} as Record<string, Json>,
 };
+
+// The exported fixture only contains matched issues, so synthesise one unmatched
+// file from the first reader payload. That keeps the dev harness showing a real
+// file (readable pages, progress) instead of an empty state.
+const mockFile = (() => {
+  const exported = (data.unmatchedFiles as Json[] | undefined)?.[0];
+  if (exported) {
+    const reader = Object.values(data.readers as Json).find(
+      (payload) => payload.fileId === exported.id,
+    );
+    return reader ? { ...exported, payload: reader } : null;
+  }
+  const entry = Object.entries(data.readers as Json)[0];
+  if (!entry) return null;
+  const [issueId, payload] = entry;
+  const issue = findIssue(issueId);
+  const path = String(issue?.filePath ?? payload.fileId);
+  const stem = path.split(/[\\/]/).pop() ?? "Unmatched file";
+  return {
+    id: String(payload.fileId),
+    rootId: (store.roots as Json[])[0]?.id ?? null,
+    path,
+    relativePath: stem,
+    format: String(issue?.format ?? "cbz"),
+    sizeBytes: 12_400_000,
+    pageCount: (payload.pages as Json[]).length,
+    status: "present",
+    addedAt: new Date().toISOString(),
+    page: 0,
+    progressStatus: "unread",
+    lastReadAt: null,
+    suggestedSeries: String(stem).replace(/\.[^.]+$/, "").replace(/[_-]+/g, " "),
+    suggestedNumber: "1",
+    suggestedTitle: String(stem).replace(/\.[^.]+$/, ""),
+    payload,
+  };
+})();
+const mockSessions = new Set<string>();
 
 function findIssue(id: string) {
   return (store.issues as Json[]).find((issue) => issue.id === id);
@@ -41,6 +81,7 @@ function decorate(issue: Json): Json {
   const base = {
     variantOf: issue.variantOf ?? null,
     edition: issue.edition ?? null,
+    metadataLocked: issue.metadataLocked ?? false,
     variantCount: (store.issues as Json[]).filter((entry) => entry.variantOf === issue.id).length,
   };
   if (isProtected(issue)) {
@@ -99,6 +140,69 @@ function applyFilter(filter: Json = {}): Json[] {
   return issues.map(decorate);
 }
 
+function smartRuleMatches(issue: Json, rule: Json): boolean {
+  const valueOf = (field: string): string => {
+    switch (field) {
+      case "series":
+        return String(issue.seriesTitle ?? "");
+      case "status":
+        return String(issue.status ?? "unread");
+      case "format":
+        return String(issue.format ?? "");
+      case "year":
+        return String(issue.releaseDate ?? "").slice(0, 4);
+      case "pages":
+        return String(issue.pageCount ?? 0);
+      case "lastPage":
+        return String(issue.lastPage ?? 0);
+      default:
+        return String(issue[field] ?? "");
+    }
+  };
+  const actual = valueOf(rule.field);
+  const expected = String(rule.value ?? "");
+  const numeric = ["year", "pages", "lastPage"].includes(rule.field);
+  const actualNumber = Number(actual);
+  const expectedNumber = Number(expected);
+  switch (rule.op) {
+    case "contains":
+      return actual.toLowerCase().includes(expected.toLowerCase());
+    case "startsWith":
+      return actual.toLowerCase().startsWith(expected.toLowerCase());
+    case "eq":
+      return numeric ? actualNumber === expectedNumber : actual === expected;
+    case "ne":
+      return actual !== expected;
+    case "gt":
+      return numeric ? actualNumber > expectedNumber : actual > expected;
+    case "gte":
+      return numeric ? actualNumber >= expectedNumber : actual >= expected;
+    case "lt":
+      return numeric ? actualNumber < expectedNumber : actual < expected;
+    case "lte":
+      return numeric ? actualNumber <= expectedNumber : actual <= expected;
+    case "isSet":
+      return actual.trim() !== "";
+    case "isEmpty":
+      return actual.trim() === "";
+    default:
+      return false;
+  }
+}
+
+function applySmartRules(rules: Json): Json[] {
+  const all = (rules.all ?? []) as Json[];
+  const any = (rules.any ?? []) as Json[];
+  if (all.length === 0 && any.length === 0) return [];
+  return (store.issues as Json[])
+    .filter(
+      (issue: Json) =>
+        all.every((rule: Json) => smartRuleMatches(issue, rule)) &&
+        (any.length === 0 || any.some((rule: Json) => smartRuleMatches(issue, rule))),
+    )
+    .map(decorate);
+}
+
 function recomputeSeries(): Json[] {
   const series = store.series as Json[];
   return series.map((entry) => {
@@ -106,6 +210,7 @@ function recomputeSeries(): Json[] {
     const overrides = ((entry.missingOverrides ?? {}) as Record<string, string>);
     return {
       ...entry,
+      metadataLocked: entry.metadataLocked ?? false,
       issueCount: issues.length,
       readCount: issues.filter((issue: Json) => issue.status === "completed").length,
       missingCount: computeMissing(issues, overrides).length,
@@ -167,7 +272,7 @@ function seriesDetail(id: string) {
 
 function setProgress(issueId: string, page: number) {
   const issue = findIssue(issueId);
-  if (!issue) return { page, total: 0, status: "unread" };
+  if (!issue) return { page, total: 0, status: "unread", scrollOffset: 0 };
   const total = issue.pageCount;
   const ratio = total > 0 ? (page + 1) / total : 0;
   issue.lastPage = page;
@@ -178,7 +283,7 @@ function setProgress(issueId: string, page: number) {
   } else if (page > 0) {
     issue.status = "in-progress";
   }
-  return { page, total, status: issue.status };
+  return { page, total, status: issue.status, scrollOffset: 0 };
 }
 
 function findSeriesDirection(seriesId: string | null): string | null {
@@ -243,7 +348,23 @@ const handlers: Record<string, (args: Json) => unknown> = {
     const publishers = [
       ...new Set((store.issues as Json[]).map((issue) => issue.publisher).filter(Boolean)),
     ];
-    return { universes, publishers };
+    const formats = [...new Set((store.issues as Json[]).map((issue) => issue.format).filter(Boolean))];
+    const series = (store.series as Json[]).map((entry) => ({
+      id: entry.id,
+      title: entry.title,
+    }));
+    const years = (store.issues as Json[])
+      .map((issue) => Number(String(issue.releaseDate ?? "").slice(0, 4)))
+      .filter((year) => Number.isFinite(year) && year > 0)
+      .sort((a, b) => a - b);
+    return {
+      universes,
+      publishers,
+      formats,
+      series,
+      yearMin: years[0] ?? null,
+      yearMax: years[years.length - 1] ?? null,
+    };
   },
   series_detail: (args) => seriesDetail(args.seriesId),
   issue_detail: (args) => decorate(findIssue(args.issueId) as Json),
@@ -298,13 +419,139 @@ const handlers: Record<string, (args: Json) => unknown> = {
       }
       series[key] = value;
     }
+    if (args.patch?.metadataLocked === undefined) series.metadataLocked = true;
     return seriesDetail(args.seriesId);
   },
   save_progress: (args) => {
     const result = setProgress(args.issueId, args.page);
+    if (typeof args.scrollOffset === "number") result.scrollOffset = args.scrollOffset;
     state.progress[args.issueId] = result;
     return result;
   },
+  mark_issue_to_page: (args) => {
+    const issue = findIssue(args.issueId);
+    if (!issue) throw new Error("Issue not found");
+    const total = issue.pageCount as number;
+    const page = Math.max(0, Math.min(total - 1, Number(args.page)));
+    issue.lastPage = page;
+    issue.status =
+      issue.status === "completed" || page >= total - 1 ? "completed" : "in-progress";
+    issue.completedAt =
+      issue.status === "completed"
+        ? (issue.completedAt ?? new Date().toISOString())
+        : null;
+    return { page, total, status: issue.status, scrollOffset: 0 };
+  },
+  start_reading_session: (args) => {
+    const id = `mock-session-${Date.now()}`;
+    const issue = findIssue(args.issueId);
+    if (issue) {
+      const sessions = ((data.history ??= {}).sessions ??= []) as Json[];
+      sessions.unshift({
+        id,
+        issueId: args.issueId,
+        title: issue.title,
+        seriesTitle: issue.seriesTitle ?? null,
+        number: issue.number ?? "",
+        fileId: issue.fileId ?? null,
+        startedAt: new Date().toISOString(),
+        endedAt: new Date().toISOString(),
+        pages: 0,
+        lastPage: Number(args.page ?? issue.lastPage ?? 0),
+        status: "open",
+        resumedAt: null,
+      });
+    }
+    mockSessions.add(id);
+    return id;
+  },
+  touch_reading_session: (args) => {
+    if (mockSessions.has(args.sessionId)) {
+      const sessions = (data.history?.sessions ?? []) as Json[];
+      const session = sessions.find((entry) => entry.id === args.sessionId);
+      if (session) {
+        session.pages = args.pages;
+        session.lastPage = args.lastPage;
+        session.endedAt = new Date().toISOString();
+      }
+    }
+    return null;
+  },
+  close_reading_session: (args) => {
+    const sessions = (data.history?.sessions ?? []) as Json[];
+    const session = sessions.find((entry) => entry.id === args.sessionId);
+    if (session) {
+      session.pages = args.pages;
+      session.lastPage = args.lastPage;
+      session.endedAt = new Date().toISOString();
+      session.status = "closed";
+    }
+    mockSessions.delete(args.sessionId);
+    return null;
+  },
+  resume_reading_session: (args) => {
+    const sessions = (data.history?.sessions ?? []) as Json[];
+    const session = sessions.find((entry) => entry.id === args.sessionId);
+    if (session) {
+      session.status = "closed";
+      session.resumedAt = new Date().toISOString();
+    }
+    return null;
+  },
+  issue_variants: (args) => {
+    const issue = findIssue(args.issueId);
+    if (!issue) return [];
+    const base = (issue.variantOf as string | null) ?? issue.id;
+    return (store.issues as Json[])
+      .filter((entry) => entry.id === base || entry.variantOf === base)
+      .map(decorate);
+  },
+  preview_import: () => [
+    {
+      path: "/mock/Sonic the Hedgehog 021.cbz",
+      relativePath: "Sonic the Hedgehog 021.cbz",
+      format: "cbz",
+      pageCount: 20,
+      seriesTitle: "Sonic the Hedgehog",
+      title: "Sonic the Hedgehog #21",
+      number: "21",
+      volume: null,
+      publisher: "IDW Publishing",
+      releaseDate: "2019",
+      writer: null,
+      artist: null,
+      coverArtist: null,
+      description: null,
+      duplicate: false,
+      warning: null,
+    },
+    {
+      path: "/mock/Sonic the Hedgehog 022.cbz",
+      relativePath: "Sonic the Hedgehog 022.cbz",
+      format: "cbz",
+      pageCount: 1,
+      seriesTitle: "Sonic the Hedgehog",
+      title: "Sonic the Hedgehog #22",
+      number: "22",
+      volume: null,
+      publisher: "IDW Publishing",
+      releaseDate: "2019",
+      writer: null,
+      artist: null,
+      coverArtist: null,
+      description: null,
+      duplicate: true,
+      warning: "Archive contains a single page",
+    },
+  ],
+  commit_import: () => ({
+    root: { id: "mock", path: "/mock", addedAt: new Date().toISOString(), fileCount: 0 },
+    filesImported: 0,
+    filesSkipped: 0,
+    seriesCreated: 0,
+    issuesCreated: 0,
+    warnings: [],
+  }),
   set_issue_status: (args) => {
     const issue = findIssue(args.issueId);
     if (!issue) throw new Error("Issue not found");
@@ -317,9 +564,18 @@ const handlers: Record<string, (args: Json) => unknown> = {
     const issue = findIssue(args.issueId);
     if (!issue) throw new Error("Issue not found");
     Object.assign(issue, Object.fromEntries(Object.entries(args.patch).filter(([, v]) => v !== undefined && v !== "")));
+    if (args.patch.metadataLocked === undefined) issue.metadataLocked = true;
     return decorate(issue);
   },
-  bulk_update_issues: (args) => args.issueIds.map((id: string) => handlers.update_issue({ issueId: id, patch: args.patch })),
+  bulk_update_issues: (args) =>
+    args.issueIds
+      .filter((id: string) => args.patch.metadataLocked !== undefined || !findIssue(id)?.metadataLocked)
+      .map((id: string) => handlers.update_issue({ issueId: id, patch: args.patch })),
+  refresh_issue_metadata: (args) => {
+    const issue = findIssue(args.issueId);
+    if (!issue) throw new Error("Issue not found");
+    return args.force === true || !issue.metadataLocked;
+  },
   reveal_spoiler: (args) => {
     state.reveals.add(args.issueId);
     return null;
@@ -353,13 +609,222 @@ const handlers: Record<string, (args: Json) => unknown> = {
     }
     throw new Error("Bookmark not found");
   },
+  unmatched_files: () => {
+    if (!mockFile) return [];
+    const progress = state.fileProgress[String(mockFile.id)];
+    return [
+      {
+        ...mockFile,
+        page: progress?.page ?? 0,
+        progressStatus: progress?.status ?? "unread",
+        lastReadAt: progress?.updatedAt ?? null,
+      },
+    ];
+  },
+  file_proposal: (args) => {
+    if (!mockFile || mockFile.id !== args.fileId) throw new Error("File not found");
+    return {
+      fileId: mockFile.id,
+      filePath: mockFile.path,
+      format: mockFile.format,
+      pageCount: mockFile.pageCount,
+      seriesTitle: mockFile.suggestedSeries,
+      title: mockFile.suggestedTitle,
+      number: mockFile.suggestedNumber,
+      volume: null,
+      publisher: null,
+      releaseDate: null,
+      writer: null,
+      artist: null,
+      coverArtist: null,
+      description: null,
+    };
+  },
+  fileless_issues: () => [],
+  apply_file_match: (args) => {
+    if (!mockFile) throw new Error("No unmatched file");
+    const series = (store.series as Json[]).find(
+      (entry) => entry.id === args.patch?.seriesId,
+    );
+    const issue = {
+      ...mockFile.payload,
+      id: `matched-${Date.now()}`,
+      seriesId: series?.id ?? (store.series as Json[])[0]?.id ?? null,
+      seriesTitle: args.patch?.seriesTitle ?? series?.title ?? mockFile.suggestedSeries,
+      title: args.patch?.title ?? mockFile.suggestedTitle,
+      number: args.patch?.number ?? mockFile.suggestedNumber,
+      status: "unread",
+      lastPage: 0,
+      pageCount: mockFile.pageCount,
+      fileId: mockFile.id,
+      filePath: mockFile.path,
+    };
+    (store.issues as Json[]).push(issue);
+    return decorate(issue);
+  },
+  file_reader_payload: (args) => {
+    if (!mockFile || mockFile.id !== args.fileId) throw new Error("File not found");
+    const progress = state.fileProgress[String(mockFile.id)];
+    return {
+      ...mockFile.payload,
+      issueId: null,
+      title: mockFile.suggestedTitle,
+      seriesTitle: null,
+      number: "",
+      nextIssueId: null,
+      previousIssueId: null,
+      progress: {
+        page: progress?.page ?? 0,
+        total: mockFile.pageCount,
+        status: progress?.status ?? "unread",
+        startedAt: null,
+        completedAt: null,
+        updatedAt: progress?.updatedAt ?? null,
+        scrollOffset: progress?.scrollOffset ?? 0,
+      },
+    };
+  },
+  save_file_progress: (args) => {
+    const total = mockFile?.pageCount ?? 0;
+    const ratio = total > 0 ? (args.page + 1) / total : 0;
+    const previous = state.fileProgress[args.fileId];
+    const result = {
+      page: args.page,
+      total,
+      status:
+        previous?.status === "completed" || ratio >= settings.completionThreshold
+          ? "completed"
+          : args.page > 0
+            ? "in-progress"
+            : "unread",
+      startedAt: previous?.startedAt ?? new Date().toISOString(),
+      completedAt: null,
+      updatedAt: new Date().toISOString(),
+      scrollOffset:
+        typeof args.scrollOffset === "number"
+          ? args.scrollOffset
+          : (previous?.scrollOffset ?? 0),
+    };
+    state.fileProgress[args.fileId] = result;
+    return result;
+  },
+  file_bookmarks: (args) => state.fileBookmarks[args.fileId] ?? [],
+  add_file_bookmark: (args) => {
+    const list = state.fileBookmarks[args.fileId] ?? [];
+    const bookmark = {
+      id: `fbm-${list.length + 1}-${Date.now()}`,
+      page: args.page,
+      label: args.label ?? null,
+      note: args.note ?? null,
+      createdAt: new Date().toISOString(),
+    };
+    state.fileBookmarks[args.fileId] = [...list, bookmark];
+    return bookmark;
+  },
+  delete_file_bookmark: (args) => {
+    for (const key of Object.keys(state.fileBookmarks)) {
+      state.fileBookmarks[key] = state.fileBookmarks[key].filter(
+        (mark) => mark.id !== args.id,
+      );
+    }
+    return null;
+  },
+  update_file_bookmark_note: (args) => {
+    for (const key of Object.keys(state.fileBookmarks)) {
+      const mark = state.fileBookmarks[key].find((entry) => entry.id === args.id);
+      if (mark) {
+        mark.note = args.note ?? null;
+        return mark;
+      }
+    }
+    throw new Error("Bookmark not found");
+  },
+  set_file_spread_offset: (args) => {
+    if (mockFile) mockFile.payload.spreadOffset = args.offset;
+    return args.offset;
+  },
+  set_file_direction_override: (args) => {
+    if (mockFile) mockFile.payload.directionOverride = args.direction;
+    return args.direction;
+  },
   search_library: (args) => {
     const needle = String(args.query).toLowerCase();
     const issues = applyFilter({ search: args.query });
     const series = recomputeSeries().filter((entry: Json) =>
       String(entry.title).toLowerCase().includes(needle),
     );
-    return { issues, series, total: issues.length + series.length };
+    return {
+      issues,
+      series,
+      total: issues.length + series.length,
+      snippets: {},
+      nextCursor: null,
+    };
+  },
+  search_filtered: (args) => {
+    const filter = args.filter ?? {};
+    const needle = String(filter.query ?? "").toLowerCase();
+    let issues = applyFilter({ search: filter.query ?? "" });
+    if (filter.publisher) {
+      issues = issues.filter((issue: Json) => issue.publisher === filter.publisher);
+    }
+    if (filter.seriesId) {
+      issues = issues.filter((issue: Json) => issue.seriesId === filter.seriesId);
+    }
+    if (filter.status) {
+      issues = issues.filter((issue: Json) => issue.status === filter.status);
+    }
+    if (filter.yearFrom) {
+      issues = issues.filter(
+        (issue: Json) => Number(String(issue.releaseDate ?? "").slice(0, 4)) >= filter.yearFrom,
+      );
+    }
+    if (filter.yearTo) {
+      issues = issues.filter(
+        (issue: Json) => Number(String(issue.releaseDate ?? "").slice(0, 4)) <= filter.yearTo,
+      );
+    }
+    if (filter.sort === "title") {
+      issues = [...issues].sort((a: Json, b: Json) =>
+        String(a.title).localeCompare(String(b.title)),
+      );
+    }
+    const offset = filter.cursor ? Number(filter.cursor) : 0;
+    const limit = Number(filter.limit ?? 40);
+    const page = issues.slice(offset, offset + limit);
+    const nextCursor = offset + limit < issues.length ? String(offset + limit) : null;
+    const snippets: Record<string, string> = {};
+    if (needle) {
+      for (const issue of page) {
+        const haystack = `${issue.title} ${issue.description ?? ""}`;
+        if (haystack.toLowerCase().includes(needle)) {
+          const at = haystack.toLowerCase().indexOf(needle);
+          const start = Math.max(0, at - 24);
+          snippets[issue.id] = `…${haystack.slice(start, at + needle.length + 40)}…`;
+        }
+      }
+    }
+    const series = recomputeSeries().filter((entry: Json) =>
+      String(entry.title).toLowerCase().includes(needle),
+    );
+    if (needle) {
+      const searches = (data.recentSearches ??= []) as Json[];
+      const existing = searches.find((entry) => entry.query === filter.query);
+      if (existing) existing.searchedAt = new Date().toISOString();
+      else searches.unshift({ query: filter.query, searchedAt: new Date().toISOString() });
+    }
+    return {
+      issues: page,
+      series: offset === 0 ? series.slice(0, 8) : [],
+      total: page.length + (offset === 0 ? series.length : 0),
+      snippets,
+      nextCursor,
+    };
+  },
+  recent_searches: () => (data.recentSearches ?? []) as Json[],
+  clear_search_history: () => {
+    data.recentSearches = [];
+    return null;
   },
   search_suggestions: (args) => {
     const needle = String(args.query).toLowerCase();
@@ -440,19 +905,52 @@ const handlers: Record<string, (args: Json) => unknown> = {
     coverFileId: null,
     itemCount: 0,
     createdAt: new Date().toISOString(),
+    isSmart: false,
+    smartRules: null,
+    sortMode: "manual",
   }),
+  create_smart_collection: (args) => {
+    const id = `smart-${Date.now()}`;
+    const issues = applySmartRules(args.rules ?? { all: [], any: [] });
+    const collection = {
+      id,
+      name: args.name,
+      description: args.description ?? null,
+      coverFileId: null,
+      itemCount: issues.length,
+      createdAt: new Date().toISOString(),
+      isSmart: true,
+      smartRules: args.rules,
+      sortMode: args.sortMode ?? "series",
+    };
+    data.collections = [collection, ...((data.collections as Json[]) ?? [])];
+    data.collectionDetails = {
+      ...(data.collectionDetails as Json),
+      [id]: { ...collection, items: issues },
+    };
+    return collection;
+  },
   update_collection: (args) => {
     const existing = (data.collections as Json[]).find(
       (entry) => entry.id === args.collectionId,
     );
-    return {
+    const patch = args.patch ?? {};
+    const merged = {
       id: args.collectionId,
-      name: args.name ?? existing?.name ?? "Collection",
-      description: args.description ?? existing?.description ?? null,
-      coverFileId: args.coverFileId ?? existing?.coverFileId ?? null,
+      name: patch.name ?? existing?.name ?? "Collection",
+      description: patch.description ?? existing?.description ?? null,
+      coverFileId: patch.coverFileId ?? existing?.coverFileId ?? null,
       itemCount: existing?.itemCount ?? 0,
       createdAt: existing?.createdAt ?? new Date().toISOString(),
+      isSmart: patch.isSmart ?? existing?.isSmart ?? false,
+      smartRules: patch.smartRules ?? existing?.smartRules ?? null,
+      sortMode: patch.sortMode ?? existing?.sortMode ?? "manual",
     };
+    if (existing && merged.isSmart && merged.smartRules) {
+      merged.itemCount = applySmartRules(merged.smartRules).length;
+    }
+    if (existing) Object.assign(existing, merged);
+    return merged;
   },
   delete_collection: () => null,
   add_to_collection: () => null,
@@ -488,8 +986,41 @@ const handlers: Record<string, (args: Json) => unknown> = {
       .sort((a, b) => String(b.lastReadAt).localeCompare(String(a.lastReadAt)))
       .slice(0, 24)
       .map(decorate);
-    const sessions = (data.history?.sessions ?? []).map((session: Json) => ({ ...session }));
-    return { sessions, recent };
+    const all = (data.history?.sessions ?? []).map((session: Json) => {
+      const issue = findIssue(session.issueId);
+      return {
+        ...session,
+        lastPage: session.lastPage ?? issue?.lastPage ?? 0,
+        status: session.status ?? "closed",
+        resumedAt: session.resumedAt ?? null,
+      };
+    });
+    const sessions = all.filter((session: Json) => session.status !== "open");
+    const interrupted = all.filter((session: Json) => session.status === "open");
+    // The exported fixture has no interrupted sessions; synthesise one from a
+    // part-read issue so the resume panel is previewable in the mock harness.
+    if (interrupted.length === 0) {
+      const candidate = (store.issues as Json[]).find(
+        (issue) => issue.status === "in-progress" && issue.lastPage > 0,
+      );
+      if (candidate) {
+        interrupted.push({
+          id: "mock-interrupted",
+          issueId: candidate.id,
+          title: candidate.title,
+          seriesTitle: candidate.seriesTitle ?? null,
+          number: candidate.number ?? "",
+          fileId: candidate.fileId ?? null,
+          startedAt: candidate.lastReadAt ?? new Date().toISOString(),
+          endedAt: candidate.lastReadAt ?? new Date().toISOString(),
+          pages: 4,
+          lastPage: candidate.lastPage,
+          status: "open",
+          resumedAt: null,
+        });
+      }
+    }
+    return { sessions, interrupted, recent };
   },
   export_library: () => ({ version: 1, issues: store.issues }),
   export_library_to: () => null,

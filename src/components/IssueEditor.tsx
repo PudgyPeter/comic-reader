@@ -27,6 +27,9 @@ function IssueEditorForm({
   const [form, setForm] = useState<IssuePatch>({});
   const [saving, setSaving] = useState(false);
   const [reveal, setReveal] = useState(false);
+  const [markPage, setMarkPage] = useState("");
+  const [locked, setLocked] = useState(issue?.metadataLocked ?? false);
+  const [lockDirty, setLockDirty] = useState(false);
 
   const series = useQuery({
     queryKey: ["editor-series"],
@@ -52,6 +55,8 @@ function IssueEditorForm({
       variantOf: issue?.variantOf ?? null,
     });
     setReveal(false);
+    setLocked(issue?.metadataLocked ?? false);
+    setLockDirty(false);
   }
 
   const field = (key: keyof IssuePatch) => ({
@@ -68,6 +73,9 @@ function IssueEditorForm({
       if (!patch.seriesId) delete patch.seriesId;
       if (patch.variantOf === null) patch.variantOf = "";
       if (patch.edition === null) patch.edition = "";
+      // Only send the lock when the user changed it; otherwise saving an edit
+      // implicitly locks the issue on the backend.
+      if (lockDirty) patch.metadataLocked = locked;
       await api.updateIssue(issue.id, patch);
       onSaved();
     } catch (error) {
@@ -198,6 +206,102 @@ function IssueEditorForm({
             placeholder={issue?.spoilerProtected && !reveal ? "Hidden by spoiler protection" : ""}
           />
         </label>
+      </div>
+      {issue && issue.pageCount > 0 && (
+        <div className="mt-3 rounded-lg border border-[var(--line)] bg-[var(--surface-1)] px-3 py-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-[11px] font-medium">Reading position</span>
+            <span className="text-[10px] text-muted">
+              page {issue.lastPage + 1} of {issue.pageCount}
+            </span>
+            <form
+              className="ml-auto flex items-center gap-1"
+              onSubmit={async (event) => {
+                event.preventDefault();
+                const value = Number(markPage);
+                if (!Number.isFinite(value)) return;
+                const target = Math.max(1, Math.min(issue.pageCount, Math.round(value)));
+                setSaving(true);
+                try {
+                  await api.markIssueToPage(issue.id, target - 1);
+                  setMarkPage("");
+                  toast.push(`Marked read up to page ${target}`, "success");
+                  onSaved();
+                } catch (error) {
+                  toast.push(String(error), "error");
+                } finally {
+                  setSaving(false);
+                }
+              }}
+            >
+              <input
+                value={markPage}
+                onChange={(event) =>
+                  setMarkPage(event.currentTarget.value.replace(/[^0-9]/g, ""))
+                }
+                inputMode="numeric"
+                placeholder="Page"
+                aria-label="Mark read up to page"
+                title="Mark every page up to this number as read"
+                className="input h-7 w-16 text-center text-xs"
+              />
+              <button className="btn btn-sm" disabled={saving || !markPage} type="submit">
+                Mark read to page
+              </button>
+            </form>
+          </div>
+          <p className="mt-1 text-[10px] text-muted">
+            Pages up to this number count as read. The final page completes the issue.
+          </p>
+        </div>
+      )}
+      <div className="mt-3 rounded-lg border border-[var(--line)] bg-[var(--surface-1)] px-3 py-2">
+        <label className="flex items-start gap-2">
+          <input
+            type="checkbox"
+            className="mt-0.5"
+            checked={locked}
+            onChange={(event) => {
+              setLocked(event.currentTarget.checked);
+              setLockDirty(true);
+            }}
+          />
+          <span>
+            <span className="text-[11px] font-medium">Protect manual edits (metadata lock)</span>
+            <span className="mt-0.5 block text-[10px] text-muted">
+              {locked
+                ? "Locked: rescans and metadata refreshes will not overwrite these fields."
+                : "Unlocked: the next metadata refresh may replace these fields. Saving an edit locks them automatically."}
+            </span>
+          </span>
+        </label>
+        {locked && (
+          <button
+            type="button"
+            className="btn btn-sm mt-2"
+            disabled={saving}
+            onClick={async () => {
+              if (!issue) return;
+              setSaving(true);
+              try {
+                const refreshed = await api.refreshIssueMetadata(issue.id, true);
+                toast.push(
+                  refreshed
+                    ? "Metadata restored from the archive"
+                    : "Refresh skipped — unlock the issue first",
+                  refreshed ? "success" : "info",
+                );
+                onSaved();
+              } catch (error) {
+                toast.push(String(error), "error");
+              } finally {
+                setSaving(false);
+              }
+            }}
+          >
+            Refresh from file
+          </button>
+        )}
       </div>
       <p className="mt-3 rounded-lg border border-[var(--line)] bg-[var(--surface-1)] px-3 py-2 text-[11px] leading-relaxed text-muted">
         Metadata is stored in the local database. The original archive is never modified.

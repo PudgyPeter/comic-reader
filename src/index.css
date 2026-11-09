@@ -311,6 +311,7 @@ a:focus-visible {
 .reader-page {
   user-select: none;
   -webkit-user-drag: none;
+  filter: brightness(var(--reader-brightness, 1)) url(#reader-gamma);
 }
 
 .grain::before {

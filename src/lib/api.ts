@@ -3,11 +3,18 @@ import type {
   Bookmark,
   Collection,
   CollectionDetail,
+  CollectionPatch,
+  CollectionSortMode,
+  ImportCandidate,
+  ImportOverride,
   ImportResult,
   HistoryPayload,
   IssueCard,
+  FileProgressState,
+  FileProposal,
   IssuePatch,
   LibraryFilter,
+  MatchFilePatch,
   LibraryRoot,
   LibrarySnapshot,
   NextIssue,
@@ -15,13 +22,17 @@ import type {
   ReaderPayload,
   ReadingOrder,
   ReadingOrderDetail,
+  RecentSearch,
   SavedSearch,
+  SearchFilter,
   SearchResult,
   SearchSuggestion,
   SeriesDetail,
   SeriesPatch,
   Settings,
+  SmartRules,
   Stats,
+  UnmatchedFile,
 } from "./types";
 
 interface CommandError {
@@ -50,13 +61,23 @@ function command<T>(name: string, args?: Record<string, unknown>): Promise<T> {
 
 export const api = {
   addLibraryRoot: (path: string) => command<ImportResult>("add_library_root", { path }),
+  previewImport: (path: string) => command<ImportCandidate[]>("preview_import", { path }),
+  commitImport: (path: string, overrides: ImportOverride[]) =>
+    command<ImportResult>("commit_import", { path, overrides }),
   rescanLibrary: () => command<ImportResult[]>("rescan_library"),
   cancelImport: () => command<boolean>("cancel_import"),
   removeLibraryRoot: (rootId: string) => command<void>("remove_library_root", { rootId }),
   libraryRoots: () => command<LibraryRoot[]>("library_roots"),
   library: (filter: LibraryFilter) => command<LibrarySnapshot>("library", { filter }),
   filterOptions: () =>
-    command<{ universes: string[]; publishers: string[] }>("filter_options"),
+    command<{
+      universes: string[];
+      publishers: string[];
+      formats: string[];
+      series: { id: string; title: string }[];
+      yearMin: number | null;
+      yearMax: number | null;
+    }>("filter_options"),
   seriesDetail: (seriesId: string) => command<SeriesDetail>("series_detail", { seriesId }),
   createSeries: (title: string, publisher?: string, universe?: string) =>
     command<SeriesDetail>("create_series", { title, publisher, universe }),
@@ -68,20 +89,40 @@ export const api = {
     command<IssueCard>("update_issue", { issueId, patch }),
   bulkUpdateIssues: (issueIds: string[], patch: IssuePatch) =>
     command<IssueCard[]>("bulk_update_issues", { issueIds, patch }),
+  refreshIssueMetadata: (issueId: string, force?: boolean) =>
+    command<boolean>("refresh_issue_metadata", { issueId, force }),
   deleteIssue: (issueId: string) => command<void>("delete_issue", { issueId }),
   readerPayload: (issueId: string) => command<ReaderPayload>("reader_payload", { issueId }),
+  issueVariants: (issueId: string) => command<IssueCard[]>("issue_variants", { issueId }),
   setSpreadOffset: (issueId: string, offset: number) =>
     command<number>("set_spread_offset", { issueId, offset }),
   setDirectionOverride: (issueId: string, direction: "ltr" | "rtl" | null) =>
     command<"ltr" | "rtl" | null>("set_direction_override", { issueId, direction }),
   setMissingReason: (seriesId: string, number: string, reason: "missing" | "not-required" | null) =>
     command<void>("set_missing_reason", { seriesId, number, reason }),
-  saveProgress: (issueId: string, page: number, completionThreshold?: number) =>
-    command<{ page: number; total: number; status: string }>("save_progress", {
-      issueId,
-      page,
-      completionThreshold,
-    }),
+  saveProgress: (
+    issueId: string,
+    page: number,
+    scrollOffset?: number | null,
+    completionThreshold?: number,
+  ) =>
+    command<{ page: number; total: number; status: string; scrollOffset: number }>(
+      "save_progress",
+      { issueId, page, scrollOffset, completionThreshold },
+    ),
+  markIssueToPage: (issueId: string, page: number) =>
+    command<{ page: number; total: number; status: string; scrollOffset: number }>(
+      "mark_issue_to_page",
+      { issueId, page },
+    ),
+  startReadingSession: (issueId: string, page: number) =>
+    command<string>("start_reading_session", { issueId, page }),
+  touchReadingSession: (sessionId: string, pages: number, lastPage: number) =>
+    command<void>("touch_reading_session", { sessionId, pages, lastPage }),
+  closeReadingSession: (sessionId: string, pages: number, lastPage: number) =>
+    command<void>("close_reading_session", { sessionId, pages, lastPage }),
+  resumeReadingSession: (sessionId: string) =>
+    command<void>("resume_reading_session", { sessionId }),
   setIssueStatus: (issueId: string, status: string) =>
     command<IssueCard>("set_issue_status", { issueId, status }),
   setSeriesDirection: (seriesId: string, direction: "ltr" | "rtl" | null) =>
@@ -92,6 +133,9 @@ export const api = {
     command<void>("record_reading_session", { issueId, pages, seconds }),
   search: (query: string, limit?: number) =>
     command<SearchResult>("search_library", { query, limit }),
+  searchFiltered: (filter: SearchFilter) => command<SearchResult>("search_filtered", { filter }),
+  recentSearches: () => command<RecentSearch[]>("recent_searches"),
+  clearSearchHistory: () => command<void>("clear_search_history"),
   searchSuggestions: (query: string) =>
     command<SearchSuggestion[]>("search_suggestions", { query }),
   savedSearches: () => command<SavedSearch[]>("saved_searches"),
@@ -116,12 +160,14 @@ export const api = {
     command<CollectionDetail>("collection", { collectionId }),
   createCollection: (name: string, description?: string) =>
     command<Collection>("create_collection", { name, description }),
-  updateCollection: (
-    collectionId: string,
-    name?: string,
-    description?: string,
-    coverFileId?: string,
-  ) => command<Collection>("update_collection", { collectionId, name, description, coverFileId }),
+  createSmartCollection: (
+    name: string,
+    description: string | undefined,
+    rules: SmartRules,
+    sortMode?: CollectionSortMode,
+  ) => command<Collection>("create_smart_collection", { name, description, rules, sortMode }),
+  updateCollection: (collectionId: string, patch: CollectionPatch) =>
+    command<Collection>("update_collection", { collectionId, patch }),
   deleteCollection: (collectionId: string) =>
     command<void>("delete_collection", { collectionId }),
   addToCollection: (collectionId: string, issueIds: string[]) =>
@@ -134,6 +180,25 @@ export const api = {
     command<void>("reorder_collection", { collectionId, issueIds }),
   getSettings: () => command<Settings>("get_settings"),
   saveSettings: (settings: Settings) => command<Settings>("save_settings", { settings }),
+  unmatchedFiles: () => command<UnmatchedFile[]>("unmatched_files"),
+  fileProposal: (fileId: string) => command<FileProposal>("file_proposal", { fileId }),
+  filelessIssues: () => command<IssueCard[]>("fileless_issues"),
+  applyFileMatch: (fileId: string, patch: MatchFilePatch, issueId?: string | null) =>
+    command<IssueCard>("apply_file_match", { fileId, patch, issueId: issueId ?? null }),
+  fileReaderPayload: (fileId: string) =>
+    command<ReaderPayload>("file_reader_payload", { fileId }),
+  saveFileProgress: (fileId: string, page: number, scrollOffset?: number | null) =>
+    command<FileProgressState>("save_file_progress", { fileId, page, scrollOffset }),
+  fileBookmarks: (fileId: string) => command<Bookmark[]>("file_bookmarks", { fileId }),
+  addFileBookmark: (fileId: string, page: number, label?: string, note?: string) =>
+    command<Bookmark>("add_file_bookmark", { fileId, page, label, note }),
+  deleteFileBookmark: (id: string) => command<void>("delete_file_bookmark", { id }),
+  updateFileBookmarkNote: (id: string, note: string | null) =>
+    command<Bookmark>("update_file_bookmark_note", { id, note }),
+  setFileSpreadOffset: (fileId: string, offset: number) =>
+    command<number>("set_file_spread_offset", { fileId, offset }),
+  setFileDirectionOverride: (fileId: string, direction: "ltr" | "rtl" | null) =>
+    command<"ltr" | "rtl" | null>("set_file_direction_override", { fileId, direction }),
   bookmarks: (issueId: string) => command<Bookmark[]>("bookmarks", { issueId }),
   addBookmark: (issueId: string, page: number, label?: string, note?: string) =>
     command<Bookmark>("add_bookmark", { issueId, page, label, note }),
@@ -175,6 +240,7 @@ export function coverUrl(fileId: string | null, page = 0, width = 320) {
   return resolve(`${assetOrigin}/cover/${fileId}/${page}/${width}`);
 }
 
-export function pageUrl(fileId: string, page: number) {
-  return resolve(`${assetOrigin}/page/${fileId}/${page}`);
+export function pageUrl(fileId: string, page: number, width?: number) {
+  const suffix = width ? `/${Math.round(width)}` : "";
+  return resolve(`${assetOrigin}/page/${fileId}/${page}${suffix}`);
 }

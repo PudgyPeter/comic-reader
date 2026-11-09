@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api, MOCK_MODE } from "../lib/api";
-import type { ImportProgress } from "../lib/types";
+import type { ImportCandidate, ImportProgress } from "../lib/types";
+import { ImportReview } from "./ImportReview";
 import { cx, eventMatches, isEditableTarget } from "../lib/utils";
 import { useImportActivity } from "../store/importActivity";
 import { useSettings } from "../store/settings";
@@ -12,6 +13,7 @@ import { Icon } from "./Icon";
 const NAV = [
   { to: "/", label: "Library", icon: "grid", end: true },
   { to: "/series", label: "Series", icon: "layers" },
+  { to: "/unmatched", label: "Unmatched", icon: "filter" },
   { to: "/collections", label: "Collections", icon: "bookmark" },
   { to: "/orders", label: "Reading orders", icon: "list" },
   { to: "/history", label: "History", icon: "clock" },
@@ -140,6 +142,9 @@ export function AppShell() {
   const toast = useToast();
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [progress, setProgress] = useState<ImportProgress | null>(null);
+  const [review, setReview] = useState<{ path: string; candidates: ImportCandidate[] } | null>(
+    null,
+  );
   const importing = useImportActivity((state) => state.active);
   const beginActivity = useImportActivity((state) => state.start);
   const endActivity = useImportActivity((state) => state.end);
@@ -171,6 +176,17 @@ export function AppShell() {
     return () => window.removeEventListener("keydown", handler);
   }, [settings.shortcuts.search, paletteOpen]);
 
+  // Mock-harness affordance: ?mock&import opens the review screen without a
+  // native folder picker so the flow can be screenshotted in a browser.
+  useEffect(() => {
+    if (!MOCK_MODE) return;
+    if (!new URLSearchParams(window.location.search).has("import")) return;
+    void api
+      .previewImport("/mock/library")
+      .then((candidates) => setReview({ path: "/mock/library", candidates }))
+      .catch(() => undefined);
+  }, []);
+
   useEffect(() => {
     if (MOCK_MODE) return;
     let unlisten: (() => void) | null = null;
@@ -194,22 +210,28 @@ export function AppShell() {
   };
 
   const addFolder = async () => {
-    const { open } = await import("@tauri-apps/plugin-dialog");
-    const selection = await open({ directory: true, multiple: false, title: "Add library folder" });
+    let selection: string | string[] | null;
+    if (MOCK_MODE) {
+      // The browser harness has no native folder picker; point at the fixture.
+      selection = "/mock/library";
+    } else {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      selection = await open({
+        directory: true,
+        multiple: false,
+        title: "Add library folder",
+      });
+    }
     if (!selection || Array.isArray(selection)) return;
-    beginActivity("Importing folder");
+    beginActivity("Scanning folder");
     setProgress(null);
     try {
-      const result = await api.addLibraryRoot(selection);
-      const parts = [
-        `Imported ${result.filesImported} file${result.filesImported === 1 ? "" : "s"}`,
-        `${result.issuesCreated} issue${result.issuesCreated === 1 ? "" : "s"}`,
-      ];
-      if (result.warnings.length > 0) {
-        parts.push(`${result.warnings.length} warning${result.warnings.length === 1 ? "" : "s"}`);
+      const candidates = await api.previewImport(selection);
+      if (candidates.length === 0) {
+        toast.push("Nothing new to import in that folder", "info");
+        return;
       }
-      toast.push(parts.join(" · "), result.warnings.length ? "info" : "success");
-      window.dispatchEvent(new Event("library:changed"));
+      setReview({ path: selection, candidates });
     } catch (error) {
       if (
         (error instanceof Error && error.name === "cancelled") ||
@@ -384,6 +406,17 @@ export function AppShell() {
         </div>
       </div>
 
+      {review && (
+        <ImportReview
+          path={review.path}
+          candidates={review.candidates}
+          onClose={() => setReview(null)}
+          onImported={() => {
+            window.dispatchEvent(new Event("library:changed"));
+            setReview(null);
+          }}
+        />
+      )}
       {paletteOpen && (
         <CommandPalette open onClose={() => setPaletteOpen(false)} />
       )}

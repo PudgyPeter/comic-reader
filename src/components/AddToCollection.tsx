@@ -55,9 +55,20 @@ export function AddToCollectionMenu({
                 <button
                   key={collection.id}
                   onClick={() => add(collection.id)}
-                  className="flex w-full items-center justify-between rounded-lg px-2 py-1.5 text-left text-xs hover:bg-[var(--surface-3)]"
+                  disabled={collection.isSmart}
+                  title={
+                    collection.isSmart
+                      ? "Smart collections fill themselves from rules"
+                      : `Add to ${collection.name}`
+                  }
+                  className="flex w-full items-center justify-between rounded-lg px-2 py-1.5 text-left text-xs hover:bg-[var(--surface-3)] disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  <span className="truncate">{collection.name}</span>
+                  <span className="truncate">
+                    {collection.name}
+                    {collection.isSmart && (
+                      <span className="ml-1 text-[9px] uppercase tracking-wide text-muted">smart</span>
+                    )}
+                  </span>
                   <span className="text-[10px] text-muted">{collection.itemCount}</span>
                 </button>
               ))}

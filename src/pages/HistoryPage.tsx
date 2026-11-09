@@ -26,7 +26,7 @@ export default function HistoryPage() {
     );
   }
 
-  const { sessions, recent } = query.data;
+  const { sessions, interrupted, recent } = query.data;
 
   return (
     <div className="mx-auto w-full max-w-[1100px] px-6 py-6">
@@ -34,6 +34,50 @@ export default function HistoryPage() {
       <p className="mt-1 text-[13px] text-muted">
         Sessions and recently opened issues. Recorded locally and never uploaded.
       </p>
+
+      {interrupted.length > 0 && (
+        <section className="mt-6 rounded-xl border border-[var(--accent)]/30 bg-[var(--surface-1)] p-4">
+          <div className="flex items-center gap-2">
+            <Icon name="clock" className="size-4 text-[var(--accent)]" />
+            <h2 className="font-display text-sm font-semibold tracking-tight">
+              Resume interrupted sessions
+            </h2>
+          </div>
+          <p className="mt-1 text-[11px] text-muted">
+            These sessions never closed cleanly, so the app stopped mid-read. Pick up where
+            you left off.
+          </p>
+          <div className="mt-3 space-y-2">
+            {interrupted.map((session) => (
+              <div
+                key={session.id}
+                className="flex items-center gap-3 rounded-lg border border-[var(--line)] bg-[var(--surface-2)] px-3 py-2"
+              >
+                <Cover
+                  fileId={session.fileId}
+                  title={session.title}
+                  className="h-11 w-8 shrink-0"
+                  width={80}
+                  rounded="rounded"
+                />
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-[12px] font-medium">{session.title}</p>
+                  <p className="truncate text-[10px] text-muted">
+                    {session.seriesTitle ? `${session.seriesTitle} · ` : ""}
+                    {formatRelative(session.endedAt)} · page {session.lastPage + 1}
+                  </p>
+                </div>
+                <Link
+                  to={`/reader/${session.issueId}?session=${session.id}&page=${session.lastPage + 1}`}
+                  className="btn btn-sm btn-primary"
+                >
+                  Resume
+                </Link>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
 
       <section className="mt-6">
         <h2 className="mb-3 font-display text-sm font-semibold tracking-tight">Recently opened</h2>
@@ -101,9 +145,15 @@ export default function HistoryPage() {
                     {formatRelative(session.endedAt)}
                   </p>
                 </div>
-                <span className="shrink-0 text-[11px] tabular-nums text-muted">
-                  {session.pages} page{session.pages === 1 ? "" : "s"}
-                </span>
+                <div className="shrink-0 text-right">
+                  <p className="text-[11px] tabular-nums text-muted">
+                    {session.pages} page{session.pages === 1 ? "" : "s"}
+                  </p>
+                  <p className="text-[10px] tabular-nums text-muted">
+                    to page {session.lastPage + 1}
+                  </p>
+                </div>
+
               </Link>
             ))}
           </div>

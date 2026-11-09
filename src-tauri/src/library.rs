@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use rusqlite::{params, Connection, OptionalExtension};
@@ -145,22 +145,10 @@ pub struct ImportProgress {
     pub current: String,
 }
 
-pub fn import_root(conn: &mut Connection, path: &Path) -> AppResult<ImportResult> {
-    import_root_with_progress(conn, path, &ImportControl::new(), |_| {})
-}
-
-pub fn import_root_with_progress(
-    conn: &mut Connection,
-    path: &Path,
-    control: &ImportControl,
-    mut report: impl FnMut(ImportProgress),
-) -> AppResult<ImportResult> {
-    let root = normalize_root(path)?;
-    let (root_id, _) = ensure_root(conn, &root)?;
-
+fn scan_candidate_paths(root: &Path) -> (Vec<PathBuf>, Vec<ImportWarning>) {
     let mut candidates: Vec<PathBuf> = Vec::new();
     let mut warnings: Vec<ImportWarning> = Vec::new();
-    let walker = WalkDir::new(&root).max_depth(6).follow_links(false);
+    let walker = WalkDir::new(root).max_depth(6).follow_links(false);
     for entry in walker.into_iter().filter_map(|entry| entry.ok()) {
         if candidates.len() >= MAX_SCAN_FILES {
             warnings.push(ImportWarning {
@@ -180,7 +168,7 @@ pub fn import_root_with_progress(
             }
             continue;
         }
-        if entry.file_type().is_dir() && entry.path() != root.as_path() {
+        if entry.file_type().is_dir() && entry.path() != root {
             // A folder that directly contains images is treated as one comic,
             // matching the "image folder" archive format.
             if folder_has_images(entry.path()) {
@@ -189,6 +177,33 @@ pub fn import_root_with_progress(
         }
     }
     candidates.sort();
+    (candidates, warnings)
+}
+
+pub fn import_root(conn: &mut Connection, path: &Path) -> AppResult<ImportResult> {
+    import_root_with_progress(conn, path, &ImportControl::new(), |_| {})
+}
+
+pub fn import_root_with_progress(
+    conn: &mut Connection,
+    path: &Path,
+    control: &ImportControl,
+    report: impl FnMut(ImportProgress),
+) -> AppResult<ImportResult> {
+    import_root_with_overrides(conn, path, control, &HashMap::new(), report)
+}
+
+pub fn import_root_with_overrides(
+    conn: &mut Connection,
+    path: &Path,
+    control: &ImportControl,
+    overrides: &HashMap<String, ImportOverride>,
+    mut report: impl FnMut(ImportProgress),
+) -> AppResult<ImportResult> {
+    let root = normalize_root(path)?;
+    let (root_id, _) = ensure_root(conn, &root)?;
+
+    let (candidates, mut warnings) = scan_candidate_paths(&root);
     if control.is_cancelled() {
         return Err(AppError::cancelled());
     }
@@ -237,7 +252,7 @@ pub fn import_root_with_progress(
             files_skipped += 1;
             continue;
         }
-        match import_file(conn, &root_id, &candidate, &relative) {
+        match import_file(conn, &root_id, &candidate, &relative, overrides) {
             Ok(Some(outcome)) => {
                 files_imported += 1;
                 if outcome.series_created {
@@ -285,42 +300,256 @@ struct FileOutcome {
     warnings: Vec<ImportWarning>,
 }
 
+fn file_format(path: &Path) -> Option<&'static str> {
+    let name = path.file_name().map(|name| name.to_string_lossy().to_string())?;
+    let lower = name.to_ascii_lowercase();
+    if path.is_dir() {
+        Some("folder")
+    } else if lower.ends_with(".cbz") || lower.ends_with(".zip") {
+        Some("cbz")
+    } else if lower.ends_with(".cbr") {
+        Some("cbr")
+    } else if lower.ends_with(".pdf") {
+        Some("pdf")
+    } else {
+        None
+    }
+}
+
+fn read_pages(path: &Path, format: &str) -> AppResult<Vec<archive::ArchiveEntry>> {
+    match format {
+        "folder" => archive::read_folder(path),
+        "cbr" => archive::read_rar(path),
+        "pdf" => archive::read_pdf_entries(path),
+        _ => archive::read_archive(path),
+    }
+}
+
+/// Scans a folder and returns the metadata the import would apply, without
+/// writing anything. The import review screen edits these before committing.
+pub fn preview_import(
+    conn: &Connection,
+    path: &Path,
+    control: &ImportControl,
+) -> AppResult<Vec<ImportCandidate>> {
+    let root = normalize_root(path)?;
+    let (candidates, _) = scan_candidate_paths(&root);
+    // Files already indexed under this root are skipped so the review screen
+    // only shows new content.
+    let existing: HashSet<String> = conn
+        .query_row(
+            "SELECT id FROM library_roots WHERE path = ?1",
+            [to_stored_path(&root)],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .map(|root_id| -> AppResult<HashSet<String>> {
+            let mut stmt =
+                conn.prepare("SELECT relative_path FROM library_files WHERE root_id = ?1")?;
+            let rows = stmt.query_map([root_id], |row| row.get::<_, String>(0))?;
+            Ok(rows.collect::<Result<HashSet<_>, _>>()?)
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    for candidate in candidates {
+        if control.is_cancelled() {
+            return Err(AppError::cancelled());
+        }
+        let Some(format) = file_format(&candidate) else {
+            continue;
+        };
+        let relative = candidate
+            .strip_prefix(&root)
+            .unwrap_or(&candidate)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if existing.iter().any(|stored| paths_equal(stored, &relative)) {
+            continue;
+        }
+        let pages = match read_pages(&candidate, format) {
+            Ok(pages) if !pages.is_empty() => pages,
+            Ok(_) => continue,
+            Err(err) => {
+                out.push(ImportCandidate {
+                    path: to_stored_path(&candidate),
+                    relative_path: relative,
+                    format: format.to_string(),
+                    page_count: 0,
+                    title: String::new(),
+                    series_title: String::new(),
+                    number: String::new(),
+                    duplicate: false,
+                    warning: Some(err.to_string()),
+                    ..Default::default()
+                });
+                continue;
+            }
+        };
+        let proposed = propose_metadata(&candidate, "");
+        let duplicate: bool = conn
+            .query_row(
+                "SELECT count(*) FROM issues i JOIN series s ON s.id = i.series_id
+                 WHERE lower(s.title) = lower(?1) AND i.number = ?2",
+                params![proposed.series_title, proposed.number],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|count| count > 0)
+            .unwrap_or(false);
+        out.push(ImportCandidate {
+            path: to_stored_path(&candidate),
+            relative_path: relative,
+            format: format.to_string(),
+            page_count: pages.len() as i64,
+            series_title: proposed.series_title,
+            title: proposed.title,
+            number: proposed.number,
+            volume: proposed.volume,
+            publisher: proposed.publisher,
+            release_date: proposed.release_date,
+            writer: proposed.writer,
+            artist: proposed.artist,
+            cover_artist: proposed.cover_artist,
+            description: proposed.description,
+            duplicate,
+            warning: if pages.len() < 2 {
+                Some("Archive contains a single page".into())
+            } else {
+                None
+            },
+        });
+    }
+    Ok(out)
+}
+
+/// Import with the corrections collected by the review screen.
+pub fn commit_import(
+    conn: &mut Connection,
+    path: &Path,
+    control: &ImportControl,
+    overrides: &[ImportOverride],
+    report: impl FnMut(ImportProgress),
+) -> AppResult<ImportResult> {
+    let map: HashMap<String, ImportOverride> = overrides
+        .iter()
+        .map(|entry| (entry.relative_path.clone(), entry.clone()))
+        .collect();
+    import_root_with_overrides(conn, path, control, &map, report)
+}
+
+/// Metadata proposed for one file, before any user correction.
+pub struct Proposed {
+    pub series_title: String,
+    pub title: String,
+    pub number: String,
+    pub volume: Option<String>,
+    pub publisher: Option<String>,
+    pub release_date: Option<String>,
+    pub writer: Option<String>,
+    pub artist: Option<String>,
+    pub cover_artist: Option<String>,
+    pub description: Option<String>,
+}
+
+pub fn propose_metadata(path: &Path, fallback_name: &str) -> Proposed {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| fallback_name.to_string());
+    let comic_info = metadata::read_comic_info(path).ok().flatten();
+    let parsed = metadata::parse_filename(&name);
+
+    let series_title = comic_info
+        .as_ref()
+        .and_then(|info| info.series.clone())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| {
+            if parsed.series.trim().is_empty() {
+                name.clone()
+            } else {
+                parsed.series.clone()
+            }
+        });
+    let number = comic_info
+        .as_ref()
+        .and_then(|info| info.number.clone())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| parsed.number.clone());
+    let title = comic_info
+        .as_ref()
+        .and_then(|info| info.title.clone())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| {
+            if number.is_empty() {
+                series_title.clone()
+            } else {
+                format!("{series_title} #{number}")
+            }
+        });
+    let publisher = comic_info.as_ref().and_then(|info| info.publisher.clone());
+    let release_date = comic_info
+        .as_ref()
+        .and_then(|info| info.release_date.clone())
+        .or(parsed.year.clone());
+    Proposed {
+        series_title,
+        title,
+        number,
+        volume: comic_info.as_ref().and_then(|info| info.volume.clone()),
+        publisher,
+        release_date,
+        writer: comic_info.as_ref().and_then(|info| info.writer.clone()),
+        artist: comic_info.as_ref().and_then(|info| info.artist.clone()),
+        cover_artist: comic_info.as_ref().and_then(|info| info.cover_artist.clone()),
+        description: comic_info.as_ref().and_then(|info| info.description.clone()),
+    }
+}
+
+fn apply_override(proposed: &mut Proposed, patch: &ImportOverride) {
+    let set = |slot: &mut String, value: &Option<String>| {
+        if let Some(value) = value.as_ref().filter(|value| !value.trim().is_empty()) {
+            *slot = value.trim().to_string();
+        }
+    };
+    let set_opt = |slot: &mut Option<String>, value: &Option<String>| {
+        if let Some(value) = value.as_ref().filter(|value| !value.trim().is_empty()) {
+            *slot = Some(value.trim().to_string());
+        }
+    };
+    set(&mut proposed.series_title, &patch.series_title);
+    set(&mut proposed.title, &patch.title);
+    set(&mut proposed.number, &patch.number);
+    set_opt(&mut proposed.volume, &patch.volume);
+    set_opt(&mut proposed.publisher, &patch.publisher);
+    set_opt(&mut proposed.release_date, &patch.release_date);
+    set_opt(&mut proposed.writer, &patch.writer);
+    set_opt(&mut proposed.artist, &patch.artist);
+    set_opt(&mut proposed.cover_artist, &patch.cover_artist);
+    set_opt(&mut proposed.description, &patch.description);
+}
+
 fn import_file(
     conn: &mut Connection,
     root_id: &str,
     path: &Path,
     relative: &str,
+    overrides: &HashMap<String, ImportOverride>,
 ) -> AppResult<Option<FileOutcome>> {
     let name = path
         .file_name()
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or_default();
-    let lower = name.to_ascii_lowercase();
-    let format = if path.is_dir() {
-        "folder"
-    } else if lower.ends_with(".cbz") || lower.ends_with(".zip") {
-        "cbz"
-    } else if lower.ends_with(".cbr") {
-        "cbr"
-    } else if lower.ends_with(".pdf") {
-        "pdf"
-    } else {
+    let Some(format) = file_format(path) else {
         return Ok(None);
     };
 
-    let pages = match format {
-        "folder" => archive::read_folder(path)?,
-        "cbr" => archive::read_rar(path)?,
-        "pdf" => archive::read_pdf_entries(path)?,
-        _ => archive::read_archive(path)?,
-    };
+    let pages = read_pages(path, format)?;
     if pages.is_empty() {
         return Ok(None);
     }
 
     let size = std::fs::metadata(path)?.len() as i64;
-    let comic_info = metadata::read_comic_info(path).ok().flatten();
-    let parsed = metadata::parse_filename(&name);
+    let proposed = propose_metadata(path, &name);
 
     let tx = conn.transaction()?;
     let file_id = new_id();
@@ -356,38 +585,36 @@ fn import_file(
         )?;
     }
 
-    let series_title = comic_info
-        .as_ref()
-        .and_then(|info| info.series.clone())
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| {
-            if parsed.series.trim().is_empty() {
-                name.clone()
-            } else {
-                parsed.series.clone()
-            }
-        });
-    let number = comic_info
-        .as_ref()
-        .and_then(|info| info.number.clone())
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| parsed.number.clone());
-    let title = comic_info
-        .as_ref()
-        .and_then(|info| info.title.clone())
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| {
-            if number.is_empty() {
-                series_title.clone()
-            } else {
-                format!("{series_title} #{number}")
-            }
-        });
-    let publisher = comic_info.as_ref().and_then(|info| info.publisher.clone());
-    let release_date = comic_info
-        .as_ref()
-        .and_then(|info| info.release_date.clone())
-        .or(parsed.year.clone());
+    let mut proposed = proposed;
+    if let Some(patch) = overrides.get(relative) {
+        apply_override(&mut proposed, patch);
+    }
+    // "Keep unmatched" imports index the file without inventing an issue, so the
+    // user can match it later without losing progress or bookmarks.
+    if overrides
+        .get(relative)
+        .and_then(|patch| patch.keep_unmatched)
+        .unwrap_or(false)
+    {
+        tx.commit()?;
+        return Ok(Some(FileOutcome {
+            series_created: false,
+            issue_created: false,
+            warnings,
+        }));
+    }
+    let Proposed {
+        series_title,
+        title,
+        number,
+        volume,
+        publisher,
+        release_date,
+        writer,
+        artist,
+        cover_artist,
+        description,
+    } = proposed;
 
     let (series_id, series_created) = ensure_series(&tx, &series_title, publisher.as_deref())?;
     let sort_number = metadata::parse_number(&number);
@@ -423,13 +650,13 @@ fn import_file(
             title,
             number,
             sort_number,
-            comic_info.as_ref().and_then(|info| info.volume.clone()),
+            volume,
             publisher,
             release_date,
-            comic_info.as_ref().and_then(|info| info.writer.clone()),
-            comic_info.as_ref().and_then(|info| info.artist.clone()),
-            comic_info.as_ref().and_then(|info| info.cover_artist.clone()),
-            comic_info.as_ref().and_then(|info| info.description.clone()),
+            writer,
+            artist,
+            cover_artist,
+            description,
             timestamp
         ],
     )?;
@@ -522,9 +749,9 @@ pub fn rescan_with_progress(
 pub const DISPLAY_FIELDS: &str =
     "i.id, i.series_id, s.title, i.title, i.number, i.sort_number, i.volume, i.publisher, \
      i.universe, i.release_date, i.writer, i.artist, i.cover_artist, i.description, i.file_id, \
-     f.path, f.page_count, coalesce(p.page, 0), coalesce(p.status, 'unread'), p.last_read_at, \
+     f.path, coalesce(f.page_count, 0), coalesce(p.page, 0), coalesce(p.status, 'unread'), p.last_read_at, \
      p.completed_at, coalesce(f.status, 'missing'), i.variant_of, i.edition, \
-     (SELECT count(*) FROM issues v WHERE v.variant_of = i.id)";
+     (SELECT count(*) FROM issues v WHERE v.variant_of = i.id), i.metadata_locked";
 
 pub fn map_issue(row: &rusqlite::Row<'_>) -> rusqlite::Result<IssueCard> {
     map_issue_offset(row, 0)
@@ -559,5 +786,6 @@ pub fn map_issue_offset(row: &rusqlite::Row<'_>, base: usize) -> rusqlite::Resul
         variant_of: row.get(base + 22)?,
         edition: row.get(base + 23)?,
         variant_count: row.get(base + 24)?,
+        metadata_locked: row.get::<_, i64>(base + 25)? != 0,
     })
 }

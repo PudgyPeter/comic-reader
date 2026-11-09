@@ -24,6 +24,7 @@ pub struct SeriesSummary {
     pub year: Option<String>,
     pub reading_direction: Option<String>,
     pub missing_count: i64,
+    pub metadata_locked: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -71,6 +72,7 @@ pub struct IssueCard {
     pub variant_of: Option<String>,
     pub edition: Option<String>,
     pub variant_count: i64,
+    pub metadata_locked: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -90,6 +92,127 @@ pub struct ImportResult {
     pub series_created: i64,
     pub issues_created: i64,
     pub warnings: Vec<ImportWarning>,
+}
+
+/// Proposed metadata for one file that is not in the library yet. The import
+/// review screen shows these, lets the user correct them, and sends the edited
+/// values back with the commit request.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportCandidate {
+    pub path: String,
+    pub relative_path: String,
+    pub format: String,
+    pub page_count: i64,
+    pub series_title: String,
+    pub title: String,
+    pub number: String,
+    pub volume: Option<String>,
+    pub publisher: Option<String>,
+    pub release_date: Option<String>,
+    pub writer: Option<String>,
+    pub artist: Option<String>,
+    pub cover_artist: Option<String>,
+    pub description: Option<String>,
+    pub duplicate: bool,
+    pub warning: Option<String>,
+}
+
+/// User corrections keyed by `relative_path`. Any field left `None` keeps the
+/// value proposed from ComicInfo.xml or the filename.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportOverride {
+    pub relative_path: String,
+    pub series_title: Option<String>,
+    pub title: Option<String>,
+    pub number: Option<String>,
+    pub volume: Option<String>,
+    pub publisher: Option<String>,
+    pub release_date: Option<String>,
+    pub writer: Option<String>,
+    pub artist: Option<String>,
+    pub cover_artist: Option<String>,
+    pub description: Option<String>,
+    /// Import the file without creating an issue, so it lands in the unmatched
+    /// view. The file is still readable and trackable.
+    pub keep_unmatched: Option<bool>,
+}
+
+/// A library file that no issue references. It stays readable and keeps its own
+/// progress/bookmarks until the user matches it to an issue, which moves the
+/// existing file record instead of recreating it (ARCHITECTURE.md §10.7).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnmatchedFile {
+    pub id: String,
+    pub root_id: Option<String>,
+    pub path: String,
+    pub relative_path: String,
+    pub format: String,
+    pub size_bytes: i64,
+    pub page_count: i64,
+    pub status: String,
+    pub added_at: String,
+    pub page: i64,
+    pub progress_status: String,
+    pub last_read_at: Option<String>,
+    pub suggested_series: String,
+    pub suggested_number: String,
+    pub suggested_title: String,
+}
+
+/// Metadata proposed for an unmatched file when the user opens the match flow.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileProposal {
+    pub file_id: String,
+    pub file_path: String,
+    pub format: String,
+    pub page_count: i64,
+    pub series_title: String,
+    pub title: String,
+    pub number: String,
+    pub volume: Option<String>,
+    pub publisher: Option<String>,
+    pub release_date: Option<String>,
+    pub writer: Option<String>,
+    pub artist: Option<String>,
+    pub cover_artist: Option<String>,
+    pub description: Option<String>,
+}
+
+/// Creates a new issue from an unmatched file. The file row is reused, so
+/// progress and bookmarks carry over from `file_progress`/`file_bookmarks`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MatchFilePatch {
+    pub series_title: Option<String>,
+    pub series_id: Option<String>,
+    pub title: Option<String>,
+    pub number: Option<String>,
+    pub volume: Option<String>,
+    pub publisher: Option<String>,
+    pub release_date: Option<String>,
+    pub writer: Option<String>,
+    pub artist: Option<String>,
+    pub cover_artist: Option<String>,
+    pub description: Option<String>,
+}
+
+/// A file-scoped progress state for unmatched files. Mirrors `ProgressState`
+/// so the reader can treat both sources uniformly.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileProgressState {
+    pub page: i64,
+    pub total: i64,
+    pub status: String,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+    pub updated_at: Option<String>,
+    #[serde(default)]
+    pub scroll_offset: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -152,6 +275,8 @@ pub struct ProgressState {
     pub started_at: Option<String>,
     pub completed_at: Option<String>,
     pub updated_at: Option<String>,
+    #[serde(default)]
+    pub scroll_offset: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -191,6 +316,45 @@ pub struct ReadingOrderDetail {
     pub items: Vec<OrderItem>,
 }
 
+/// One typed rule in a smart collection. `field` and `op` are validated
+/// against an allowlist before they reach SQL; values are always bound.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SmartRule {
+    pub field: String,
+    pub op: String,
+    pub value: String,
+}
+
+/// Rules are combined with AND (`all`) and OR (`any`), then the two groups
+/// are ANDed. An empty rule set matches nothing rather than everything, so a
+/// half-built smart collection never dumps the whole library.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SmartRules {
+    #[serde(default)]
+    pub all: Vec<SmartRule>,
+    #[serde(default)]
+    pub any: Vec<SmartRule>,
+}
+
+impl SmartRules {
+    pub fn is_empty(&self) -> bool {
+        self.all.is_empty() && self.any.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionPatch {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub cover_file_id: Option<String>,
+    pub is_smart: Option<bool>,
+    pub smart_rules: Option<SmartRules>,
+    pub sort_mode: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Collection {
@@ -200,6 +364,9 @@ pub struct Collection {
     pub cover_file_id: Option<String>,
     pub item_count: i64,
     pub created_at: String,
+    pub is_smart: bool,
+    pub smart_rules: Option<SmartRules>,
+    pub sort_mode: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -216,6 +383,37 @@ pub struct SearchResult {
     pub issues: Vec<IssueCard>,
     pub series: Vec<SeriesSummary>,
     pub total: i64,
+    /// Matched excerpt per issue id, generated only after spoiler filtering.
+    pub snippets: std::collections::BTreeMap<String, String>,
+    /// Opaque cursor for the next page, absent when this is the last page.
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchFilter {
+    #[serde(default)]
+    pub query: String,
+    pub publisher: Option<String>,
+    pub series_id: Option<String>,
+    pub universe: Option<String>,
+    pub status: Option<String>,
+    pub format: Option<String>,
+    pub year_from: Option<i64>,
+    pub year_to: Option<i64>,
+    pub collection_id: Option<String>,
+    #[serde(default)]
+    pub sort: String,
+    /// Opaque cursor from a previous `nextCursor`.
+    pub cursor: Option<String>,
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecentSearch {
+    pub query: String,
+    pub searched_at: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -239,6 +437,8 @@ pub struct SavedSearch {
 pub struct Settings {
     pub background: String,
     pub page_spacing: i64,
+    pub brightness: f64,
+    pub gamma: f64,
     pub reading_direction: String,
     pub default_mode: String,
     pub default_fit: String,
@@ -274,6 +474,8 @@ impl Default for Settings {
         Settings {
             background: "#0b0c10".into(),
             page_spacing: 16,
+            brightness: 1.0,
+            gamma: 1.0,
             reading_direction: "ltr".into(),
             default_mode: "single".into(),
             default_fit: "page".into(),
@@ -360,6 +562,7 @@ pub struct IssuePatch {
     pub series_title: Option<String>,
     pub variant_of: Option<String>,
     pub edition: Option<String>,
+    pub metadata_locked: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -372,6 +575,7 @@ pub struct SeriesPatch {
     pub volume: Option<String>,
     pub cover_file_id: Option<String>,
     pub reading_direction: Option<String>,
+    pub metadata_locked: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -386,11 +590,15 @@ pub struct HistorySession {
     pub started_at: String,
     pub ended_at: String,
     pub pages: i64,
+    pub last_page: i64,
+    pub status: String,
+    pub resumed_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HistoryPayload {
     pub sessions: Vec<HistorySession>,
+    pub interrupted: Vec<HistorySession>,
     pub recent: Vec<IssueCard>,
 }

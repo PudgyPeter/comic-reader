@@ -29,6 +29,10 @@ pub fn settings(conn: &Connection) -> AppResult<Settings> {
             "pageSpacing" => {
                 settings.page_spacing = value.parse().unwrap_or(settings.page_spacing)
             }
+            "brightness" => {
+                settings.brightness = value.parse().unwrap_or(settings.brightness)
+            }
+            "gamma" => settings.gamma = value.parse().unwrap_or(settings.gamma),
             "readingDirection" => settings.reading_direction = value,
             "defaultMode" => settings.default_mode = value,
             "defaultFit" => settings.default_fit = value,
@@ -73,6 +77,8 @@ pub fn save_settings(conn: &mut Connection, incoming: &Settings) -> AppResult<Se
     let pairs: Vec<(&str, String)> = vec![
         ("background", incoming.background.clone()),
         ("pageSpacing", incoming.page_spacing.to_string()),
+        ("brightness", incoming.brightness.to_string()),
+        ("gamma", incoming.gamma.to_string()),
         ("readingDirection", incoming.reading_direction.clone()),
         ("defaultMode", incoming.default_mode.clone()),
         ("defaultFit", incoming.default_fit.clone()),
@@ -347,7 +353,7 @@ pub fn series_summaries(conn: &Connection) -> AppResult<Vec<SeriesSummary>> {
             coalesce(s.cover_file_id,
                 (SELECT i.file_id FROM issues i WHERE i.series_id = s.id AND i.file_id IS NOT NULL
                  ORDER BY i.sort_number LIMIT 1)),
-            s.cover_page, s.year, s.reading_direction
+            s.cover_page, s.year, s.reading_direction, s.metadata_locked
         FROM series s
         ORDER BY s.title COLLATE NOCASE";
     let mut stmt = conn.prepare(sql)?;
@@ -365,6 +371,7 @@ pub fn series_summaries(conn: &Connection) -> AppResult<Vec<SeriesSummary>> {
             year: row.get(9)?,
             reading_direction: row.get(10)?,
             missing_count: 0,
+            metadata_locked: row.get::<_, i64>(11)? != 0,
         })
     })?;
     let mut series = rows.collect::<Result<Vec<_>, _>>()?;
@@ -556,7 +563,39 @@ pub fn filter_options(conn: &Connection) -> AppResult<serde_json::Value> {
     };
     let universes = collect("universe")?;
     let publishers = collect("publisher")?;
-    Ok(serde_json::json!({ "universes": universes, "publishers": publishers }))
+    let formats = collect("format").unwrap_or_default();
+    let mut stmt = conn.prepare("SELECT id, title FROM series ORDER BY title COLLATE NOCASE")?;
+    let series = stmt
+        .query_map([], |row| {
+            Ok(serde_json::json!({ "id": row.get::<_, String>(0)?, "title": row.get::<_, String>(1)? }))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let years: Vec<i64> = conn
+        .prepare(
+            "SELECT DISTINCT CAST(substr(release_date, 1, 4) AS INTEGER) FROM issues
+             WHERE release_date IS NOT NULL AND length(release_date) >= 4
+               AND CAST(substr(release_date, 1, 4) AS INTEGER) BETWEEN 1800 AND 2200
+             ORDER BY 1",
+        )
+        .ok()
+        .and_then(|mut stmt| {
+            stmt.query_map([], |row| row.get::<_, i64>(0))
+                .ok()
+                .map(|rows| rows.filter_map(Result::ok).collect())
+        })
+        .unwrap_or_default();
+    let (year_min, year_max) = (
+        years.first().copied(),
+        years.last().copied(),
+    );
+    Ok(serde_json::json!({
+        "universes": universes,
+        "publishers": publishers,
+        "formats": formats,
+        "series": series,
+        "yearMin": year_min,
+        "yearMax": year_max,
+    }))
 }
 
 pub fn issue(conn: &Connection, issue_id: &str) -> AppResult<IssueCard> {
@@ -569,6 +608,33 @@ pub fn issue(conn: &Connection, issue_id: &str) -> AppResult<IssueCard> {
     let config = settings(conn)?;
     apply_spoilers(conn, &config, std::slice::from_mut(&mut issue))?;
     Ok(issue)
+}
+
+/// Returns the base issue (if `issue_id` is a variant) plus every variant linked
+/// to the same base, so the reader can compare alternate covers / editions.
+pub fn issue_variants(conn: &Connection, issue_id: &str) -> AppResult<Vec<IssueCard>> {
+    let base_id: Option<Option<String>> = conn
+        .query_row(
+            "SELECT variant_of FROM issues WHERE id = ?1",
+            [issue_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(variant_of) = base_id else {
+        return Ok(Vec::new());
+    };
+    let base = variant_of.unwrap_or_else(|| issue_id.to_string());
+    let sql = format!(
+        "{} WHERE i.id = ?1 OR i.variant_of = ?1
+         ORDER BY CASE WHEN i.id = ?1 THEN 0 ELSE 1 END, i.sort_number",
+        issue_select()
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([&base], library::map_issue)?;
+    let mut issues = rows.collect::<Result<Vec<_>, _>>()?;
+    let config = settings(conn)?;
+    apply_spoilers(conn, &config, &mut issues)?;
+    Ok(issues)
 }
 
 pub fn reader_payload(conn: &Connection, issue_id: &str) -> AppResult<ReaderPayload> {
@@ -604,7 +670,8 @@ pub fn reader_payload(conn: &Connection, issue_id: &str) -> AppResult<ReaderPayl
 
     let progress = conn
         .query_row(
-            "SELECT page, total, status, started_at, completed_at, updated_at
+            "SELECT page, total, status, started_at, completed_at, updated_at,
+                    coalesce(scroll_offset, 0)
              FROM progress WHERE issue_id = ?1",
             [issue_id],
             |row| {
@@ -615,6 +682,7 @@ pub fn reader_payload(conn: &Connection, issue_id: &str) -> AppResult<ReaderPayl
                     started_at: row.get(3)?,
                     completed_at: row.get(4)?,
                     updated_at: row.get(5)?,
+                    scroll_offset: row.get(6)?,
                 })
             },
         )
@@ -626,6 +694,7 @@ pub fn reader_payload(conn: &Connection, issue_id: &str) -> AppResult<ReaderPayl
             started_at: None,
             completed_at: None,
             updated_at: None,
+            scroll_offset: 0.0,
         });
 
     let previous_issue_id = neighbour_issue(conn, &card, false)?;
@@ -757,6 +826,19 @@ pub fn save_progress(
     page: i64,
     completion_threshold: Option<f64>,
 ) -> AppResult<ProgressState> {
+    save_reading_position(conn, issue_id, page, None, completion_threshold)
+}
+
+/// Persists the current page plus, for continuous modes, the fractional scroll
+/// offset inside that page. `offset` is clamped to 0..1; `None` leaves the stored
+/// offset untouched so mode switches back to paged reading do not erase it.
+pub fn save_reading_position(
+    conn: &mut Connection,
+    issue_id: &str,
+    page: i64,
+    offset: Option<f64>,
+    completion_threshold: Option<f64>,
+) -> AppResult<ProgressState> {
     let config = settings(conn)?;
     let threshold = completion_threshold.unwrap_or(config.completion_threshold);
     let (total, old_status, started_at): (i64, String, Option<String>) = conn
@@ -794,9 +876,20 @@ pub fn save_progress(
     } else {
         None
     };
+    let offset = offset.map(|value| value.clamp(0.0, 1.0));
+    let stored_offset: f64 = conn
+        .query_row(
+            "SELECT coalesce(scroll_offset, 0) FROM progress WHERE issue_id = ?1",
+            [issue_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(0.0);
+    let scroll_offset = offset.unwrap_or(stored_offset);
     conn.execute(
-        "INSERT INTO progress (issue_id, page, total, status, started_at, completed_at, last_read_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+        "INSERT INTO progress
+            (issue_id, page, total, status, started_at, completed_at, last_read_at, updated_at, scroll_offset)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, ?8)
          ON CONFLICT(issue_id) DO UPDATE SET
             page = excluded.page,
             total = excluded.total,
@@ -804,7 +897,8 @@ pub fn save_progress(
             started_at = coalesce(progress.started_at, excluded.started_at),
             completed_at = coalesce(excluded.completed_at, progress.completed_at),
             last_read_at = excluded.last_read_at,
-            updated_at = excluded.updated_at",
+            updated_at = excluded.updated_at,
+            scroll_offset = excluded.scroll_offset",
         params![
             issue_id,
             page,
@@ -812,7 +906,8 @@ pub fn save_progress(
             status,
             started_at.unwrap_or_else(|| timestamp.clone()),
             completed_at,
-            timestamp
+            timestamp,
+            scroll_offset
         ],
     )?;
     Ok(ProgressState {
@@ -822,6 +917,7 @@ pub fn save_progress(
         started_at: None,
         completed_at,
         updated_at: Some(timestamp),
+        scroll_offset,
     })
 }
 
@@ -859,8 +955,77 @@ pub fn set_status(conn: &Connection, issue_id: &str, status: &str) -> AppResult<
     issue(conn, issue_id)
 }
 
+/// Marks an issue read up to and including `page` (0-based). This is the
+/// "mark read up to page N" action from CORE-8: pages at or before the mark are
+/// treated as read, later pages stay unread. Reaching the final page also
+/// completes the issue.
+pub fn mark_to_page(conn: &Connection, issue_id: &str, page: i64) -> AppResult<ProgressState> {
+    let (total, old_status, started_at): (i64, String, Option<String>) = conn
+        .query_row(
+            "SELECT coalesce(p.total, f.page_count, 0), coalesce(p.status, 'unread'), p.started_at
+             FROM issues i
+             LEFT JOIN progress p ON p.issue_id = i.id
+             LEFT JOIN library_files f ON f.id = i.file_id
+             WHERE i.id = ?1",
+            [issue_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?
+        .ok_or_else(|| AppError::not_found("issue"))?;
+    let last_page = (total - 1).max(0);
+    let page = page.clamp(0, last_page);
+    // Never regress a completed issue: "mark up to page N" moves the mark forward.
+    let status = if old_status == "completed" || (total > 0 && page >= last_page) {
+        "completed"
+    } else {
+        "in-progress"
+    };
+    let timestamp = now();
+    let started_at = started_at.unwrap_or_else(|| timestamp.clone());
+    let completed_at = if status == "completed" { Some(timestamp.clone()) } else { None };
+    conn.execute(
+        "INSERT INTO progress
+            (issue_id, page, total, status, started_at, completed_at, last_read_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+         ON CONFLICT(issue_id) DO UPDATE SET
+            page = excluded.page,
+            status = excluded.status,
+            started_at = coalesce(progress.started_at, excluded.started_at),
+            completed_at = coalesce(progress.completed_at, excluded.completed_at),
+            last_read_at = excluded.last_read_at,
+            updated_at = excluded.updated_at",
+        params![issue_id, page, total, status, started_at, completed_at, timestamp],
+    )?;
+    Ok(ProgressState {
+        page,
+        total,
+        status: status.into(),
+        started_at: None,
+        completed_at,
+        updated_at: Some(timestamp),
+        scroll_offset: 0.0,
+    })
+}
+
 pub fn update_issue(conn: &mut Connection, issue_id: &str, patch: &IssuePatch) -> AppResult<IssueCard> {
     let tx = conn.transaction()?;
+    // Editing any metadata field marks the issue as user-owned so future
+    // rescans or provider refreshes cannot overwrite it. An explicit
+    // `metadata_locked` value wins (the UI uses it to unlock).
+    let edited = patch.title.is_some()
+        || patch.number.is_some()
+        || patch.volume.is_some()
+        || patch.publisher.is_some()
+        || patch.release_date.is_some()
+        || patch.writer.is_some()
+        || patch.artist.is_some()
+        || patch.cover_artist.is_some()
+        || patch.description.is_some()
+        || patch.series_id.is_some()
+        || patch.series_title.is_some()
+        || patch.variant_of.is_some()
+        || patch.edition.is_some();
+    let locked = patch.metadata_locked.or(if edited { Some(true) } else { None });
     let mut series_id = patch.series_id.clone();
     if let Some(title) = patch.series_title.as_ref().filter(|title| !title.trim().is_empty()) {
         let (id, _) = library::ensure_series(&tx, title, patch.publisher.as_deref())?;
@@ -889,6 +1054,7 @@ pub fn update_issue(conn: &mut Connection, issue_id: &str, patch: &IssuePatch) -
                 WHEN ?15 = '' THEN NULL
                 ELSE ?15
             END,
+            metadata_locked = coalesce(?16, metadata_locked),
             updated_at = ?13
          WHERE id = ?1",
         params![
@@ -906,7 +1072,8 @@ pub fn update_issue(conn: &mut Connection, issue_id: &str, patch: &IssuePatch) -
             series_id,
             now(),
             patch.variant_of,
-            patch.edition
+            patch.edition,
+            locked.map(i64::from)
         ],
     )?;
     if patch.variant_of.is_some() {
@@ -940,7 +1107,8 @@ pub fn update_issue(conn: &mut Connection, issue_id: &str, patch: &IssuePatch) -
                 |row| row.get(0),
             )?;
             tx.execute(
-                "UPDATE issues SET publisher = coalesce(publisher, ?2) WHERE series_id = ?1",
+                "UPDATE issues SET publisher = coalesce(publisher, ?2)
+                 WHERE series_id = ?1 AND metadata_locked = 0",
                 params![series, publisher],
             )?;
         }
@@ -950,13 +1118,95 @@ pub fn update_issue(conn: &mut Connection, issue_id: &str, patch: &IssuePatch) -
 
 pub fn bulk_update(conn: &mut Connection, issue_ids: &[String], patch: &IssuePatch) -> AppResult<Vec<IssueCard>> {
     let mut out = Vec::with_capacity(issue_ids.len());
+    // Bulk edits are metadata edits too, so a locked issue is skipped unless
+    // the caller is explicitly changing the lock itself.
+    let respects_lock = patch.metadata_locked.is_none();
     for id in issue_ids {
+        if respects_lock {
+            let locked: i64 = conn.query_row(
+                "SELECT metadata_locked FROM issues WHERE id = ?1",
+                [id],
+                |row| row.get(0),
+            )?;
+            if locked != 0 {
+                continue;
+            }
+        }
         out.push(update_issue(conn, id, patch)?);
     }
     Ok(out)
 }
 
+/// Re-applies metadata embedded in the source file. Manual edits are protected:
+/// a locked issue is left untouched and `false` is returned unless `force` is
+/// set, which the UI uses for an explicit user-triggered refresh. Automatic
+/// rescans and any future provider refresh must pass `false`.
+pub fn refresh_issue_metadata(
+    conn: &mut Connection,
+    issue_id: &str,
+    force: bool,
+) -> AppResult<bool> {
+    let row: Option<(i64, Option<String>)> = conn
+        .query_row(
+            "SELECT i.metadata_locked, f.path FROM issues i
+             LEFT JOIN library_files f ON f.id = i.file_id
+             WHERE i.id = ?1",
+            [issue_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((locked, path)) = row else {
+        return Err(AppError::not_found("issue"));
+    };
+    if locked != 0 && !force {
+        return Ok(false);
+    }
+    let Some(path) = path else {
+        return Ok(false);
+    };
+    let Some(info) = metadata::read_comic_info(std::path::Path::new(&path))? else {
+        return Ok(false);
+    };
+    let number = info.number.clone();
+    conn.execute(
+        "UPDATE issues SET
+            title = coalesce(?2, title),
+            number = coalesce(?3, number),
+            sort_number = coalesce(?4, sort_number),
+            volume = coalesce(?5, volume),
+            publisher = coalesce(?6, publisher),
+            release_date = coalesce(?7, release_date),
+            writer = coalesce(?8, writer),
+            artist = coalesce(?9, artist),
+            cover_artist = coalesce(?10, cover_artist),
+            description = coalesce(?11, description),
+            updated_at = ?12
+         WHERE id = ?1",
+        params![
+            issue_id,
+            info.title,
+            number,
+            number.as_ref().map(|value| metadata::parse_number(value)),
+            info.volume,
+            info.publisher,
+            info.release_date,
+            info.writer,
+            info.artist,
+            info.cover_artist,
+            info.description,
+            now(),
+        ],
+    )?;
+    Ok(true)
+}
+
 pub fn update_series(conn: &Connection, series_id: &str, patch: &SeriesPatch) -> AppResult<SeriesDetail> {
+    let edited = patch.title.is_some()
+        || patch.publisher.is_some()
+        || patch.universe.is_some()
+        || patch.description.is_some()
+        || patch.volume.is_some();
+    let locked = patch.metadata_locked.or(if edited { Some(true) } else { None });
     conn.execute(
         "UPDATE series SET
             title = coalesce(?2, title),
@@ -971,6 +1221,7 @@ pub fn update_series(conn: &Connection, series_id: &str, patch: &SeriesPatch) ->
                 WHEN ?9 = '' THEN NULL
                 ELSE ?9
             END,
+            metadata_locked = coalesce(?10, metadata_locked),
             updated_at = ?8
          WHERE id = ?1",
         params![
@@ -982,7 +1233,8 @@ pub fn update_series(conn: &Connection, series_id: &str, patch: &SeriesPatch) ->
             patch.volume,
             patch.cover_file_id,
             now(),
-            patch.reading_direction
+            patch.reading_direction,
+            locked.map(i64::from)
         ],
     )?;
     let universe: Option<String> = conn.query_row(
@@ -992,7 +1244,7 @@ pub fn update_series(conn: &Connection, series_id: &str, patch: &SeriesPatch) ->
     )?;
     if let Some(universe) = universe {
         conn.execute(
-            "UPDATE issues SET universe = ?2 WHERE series_id = ?1",
+            "UPDATE issues SET universe = ?2 WHERE series_id = ?1 AND metadata_locked = 0",
             params![series_id, universe],
         )?;
     }
@@ -1031,53 +1283,358 @@ pub fn delete_issue(conn: &Connection, issue_id: &str) -> AppResult<()> {
     Ok(())
 }
 
-pub fn search(conn: &Connection, query: &str, limit: i64) -> AppResult<SearchResult> {
+/// Escapes free text for FTS5: split on non-alphanumerics, quote each token and
+/// make it a prefix query. Returns `None` when nothing searchable remains.
+fn fts_expression(raw: &str) -> Option<String> {
+    let words: Vec<String> = raw
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(|word| format!("\"{}\"*", word.replace('"', "\"\"")))
+        .collect();
+    if words.is_empty() {
+        None
+    } else {
+        Some(words.join(" "))
+    }
+}
+
+fn search_cursor(sort: &str, values: &[String]) -> String {
+    serde_json::json!({ "sort": sort, "v": values }).to_string()
+}
+
+fn parse_cursor(cursor: &Option<String>, sort: &str) -> Option<Vec<String>> {
+    let raw = cursor.as_ref()?;
+    let value: serde_json::Value = serde_json::from_str(raw).ok()?;
+    if value.get("sort")?.as_str()? != sort {
+        return None;
+    }
+    let values = value.get("v")?.as_array()?;
+    Some(
+        values
+            .iter()
+            .map(|entry| entry.as_str().unwrap_or_default().to_string())
+            .collect(),
+    )
+}
+
+/// Full search: FTS5 over issue text, typed filters, keyset pagination and
+/// spoiler-safe snippets. `search` remains the small wrapper used by the
+/// command palette.
+pub fn search_filtered(conn: &Connection, filter: &SearchFilter) -> AppResult<SearchResult> {
     let config = settings(conn)?;
-    let needle = format!("%{}%", query.trim());
+    let limit = filter.limit.unwrap_or(60).clamp(1, 200);
+    // Only these sorts are implemented; anything else falls back to relevance
+    // instead of building an ORDER BY from caller input.
+    let mut sort = match filter.sort.as_str() {
+        "series" => "series",
+        "title" => "title",
+        "recent" => "recent",
+        _ => "relevance",
+    };
+    let expression = fts_expression(&filter.query);
+    // Filter-only searches have no FTS ranking, so relevance degrades to series
+    // order (and the cursor must page on those same columns).
+    if expression.is_none() && sort == "relevance" {
+        sort = "series";
+    }
+
+    if let Some(expression) = expression.as_ref() {
+        record_recent_search(conn, &filter.query)?;
+        let _ = expression;
+    }
+
+    let mut values: Vec<rusqlite::types::Value> = Vec::new();
+    let mut where_parts: Vec<String> = Vec::new();
+
+    if let Some(expression) = expression.as_ref() {
+        where_parts.push("issue_fts MATCH ?".into());
+        values.push(expression.clone().into());
+    }
+    if let Some(publisher) = filter.publisher.as_ref().filter(|value| !value.is_empty()) {
+        where_parts.push("coalesce(i.publisher, s.publisher) = ?".into());
+        values.push(publisher.clone().into());
+    }
+    if let Some(series_id) = filter.series_id.as_ref().filter(|value| !value.is_empty()) {
+        where_parts.push("i.series_id = ?".into());
+        values.push(series_id.clone().into());
+    }
+    if let Some(universe) = filter.universe.as_ref().filter(|value| !value.is_empty()) {
+        where_parts.push("coalesce(i.universe, s.universe) = ?".into());
+        values.push(universe.clone().into());
+    }
+    if let Some(status) = filter.status.as_ref().filter(|value| !value.is_empty()) {
+        where_parts.push("coalesce(p.status, 'unread') = ?".into());
+        values.push(status.clone().into());
+    }
+    if let Some(format) = filter.format.as_ref().filter(|value| !value.is_empty()) {
+        where_parts.push("f.format = ?".into());
+        values.push(format.clone().into());
+    }
+    if let Some(year) = filter.year_from {
+        where_parts.push("CAST(substr(coalesce(i.release_date, ''), 1, 4) AS INTEGER) >= ?".into());
+        values.push(year.into());
+    }
+    if let Some(year) = filter.year_to {
+        where_parts.push("CAST(substr(coalesce(i.release_date, ''), 1, 4) AS INTEGER) <= ?".into());
+        values.push(year.into());
+    }
+    if let Some(collection_id) = filter
+        .collection_id
+        .as_ref()
+        .filter(|value| !value.is_empty())
+    {
+        // Manual collections filter through their stored items; smart
+        // collections compile the same typed rules used by their detail page.
+        let smart: Option<(i64, Option<String>)> = conn
+            .query_row(
+                "SELECT is_smart, smart_rules FROM collections WHERE id = ?1",
+                [collection_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        match smart {
+            Some((flag, rules)) if flag != 0 => {
+                let rules: SmartRules = rules
+                    .and_then(|raw| serde_json::from_str(&raw).ok())
+                    .unwrap_or_default();
+                let (rule_sql, rule_values) = compile_smart_rules(&rules)?;
+                where_parts.push(format!("({rule_sql})"));
+                values.extend(
+                    rule_values
+                        .into_iter()
+                        .map(rusqlite::types::Value::Text),
+                );
+            }
+            _ => {
+                where_parts.push(
+                    "EXISTS (SELECT 1 FROM collection_items ci
+                             WHERE ci.collection_id = ? AND ci.issue_id = i.id)"
+                        .into(),
+                );
+                values.push(collection_id.clone().into());
+            }
+        }
+    }
+
+    let cursor = parse_cursor(&filter.cursor, sort);
+    if let Some(cursor) = cursor.as_ref() {
+        match sort {
+            "series" => {
+                if let [title, number, id] = cursor.as_slice() {
+                    where_parts.push(
+                        "(s.title COLLATE NOCASE, i.sort_number, i.id) > (?, ?, ?)".into(),
+                    );
+                    values.push(title.clone().into());
+                    values.push(number.parse::<f64>().unwrap_or(0.0).into());
+                    values.push(id.clone().into());
+                }
+            }
+            "recent" => {
+                if let [last_read, id] = cursor.as_slice() {
+                    where_parts.push(
+                        "(coalesce(p.last_read_at, ''), i.id) < (?, ?)".into(),
+                    );
+                    values.push(last_read.clone().into());
+                    values.push(id.clone().into());
+                }
+            }
+            _ => {
+                if let [rank, id] = cursor.as_slice() {
+                    where_parts.push(
+                        "(bm25(issue_fts) > ? OR (bm25(issue_fts) = ? AND i.id > ?))".into(),
+                    );
+                    let rank = rank.parse::<f64>().unwrap_or(0.0);
+                    values.push(rank.into());
+                    values.push(rank.into());
+                    values.push(id.clone().into());
+                }
+            }
+        }
+    }
+
+    let order = match sort {
+        "series" => "s.title COLLATE NOCASE, i.sort_number, i.id",
+        "title" => "i.title COLLATE NOCASE, i.id",
+        "recent" => "coalesce(p.last_read_at, '') DESC, i.id DESC",
+        // Relevance needs the FTS table; a filter-only search (no text query)
+        // falls back to series order rather than referencing a missing table.
+        _ => "bm25(issue_fts), i.id",
+    };
+    let from = if expression.is_some() {
+        "FROM issue_fts JOIN issues i ON i.id = issue_fts.issue_id
+         LEFT JOIN series s ON s.id = i.series_id
+         LEFT JOIN library_files f ON f.id = i.file_id
+         LEFT JOIN progress p ON p.issue_id = i.id"
+    } else {
+        "FROM issues i
+         LEFT JOIN series s ON s.id = i.series_id
+         LEFT JOIN library_files f ON f.id = i.file_id
+         LEFT JOIN progress p ON p.issue_id = i.id"
+    };
+    let rank_column = if expression.is_some() {
+        "bm25(issue_fts)"
+    } else {
+        "0.0"
+    };
+    let snippet_column = if expression.is_some() {
+        "snippet(issue_fts, -1, '', '', '…', 14)"
+    } else {
+        "''"
+    };
+    let where_sql = if where_parts.is_empty() {
+        "1 = 1".to_string()
+    } else {
+        where_parts.join(" AND ")
+    };
+    // Select the sort key alongside the row so the cursor can be rebuilt from
+    // exactly the values SQLite sorted on.
+    let cursor_columns = match sort {
+        "series" => ", coalesce(s.title, ''), i.sort_number",
+        "recent" => ", coalesce(p.last_read_at, '')",
+        _ => "",
+    };
     let sql = format!(
-        "{} WHERE i.title LIKE ?1 OR s.title LIKE ?1 OR i.number LIKE ?1 OR i.writer LIKE ?1 \
-         OR i.artist LIKE ?1 OR i.publisher LIKE ?1 OR i.release_date LIKE ?1 OR i.description LIKE ?1 \
-         OR EXISTS (SELECT 1 FROM bookmarks b WHERE b.issue_id = i.id
-                    AND (b.note LIKE ?1 OR b.label LIKE ?1)) \
-         ORDER BY s.title COLLATE NOCASE, i.sort_number LIMIT ?2",
-        issue_select()
+        "SELECT {}, {rank_column}, {snippet_column}{cursor_columns}
+         {from} WHERE {where_sql} ORDER BY {order} LIMIT ?",
+        library::DISPLAY_FIELDS,
+        order = order,
     );
+
+    values.push((limit + 1).into());
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(params![needle, limit], library::map_issue)?;
-    let mut issues = rows.collect::<Result<Vec<_>, _>>()?;
+    let mut rows: Vec<(IssueCard, f64, String, Vec<String>)> = Vec::new();
+    let mapping = stmt.query_map(params_from_iter(values.iter()), |row| {
+        let base = 26usize;
+        let card = library::map_issue_offset(row, 0)?;
+        let rank: f64 = row.get(base)?;
+        let snippet: String = row.get(base + 1)?;
+        let mut cursor_values = Vec::new();
+        match sort {
+            "series" => {
+                cursor_values.push(row.get::<_, String>(base + 2)?);
+                cursor_values.push(row.get::<_, f64>(base + 3)?.to_string());
+            }
+            "recent" => cursor_values.push(row.get::<_, String>(base + 2)?),
+            _ => cursor_values.push(rank.to_string()),
+        }
+        cursor_values.push(card.id.clone());
+        Ok((card, rank, snippet, cursor_values))
+    })?;
+    for row in mapping {
+        rows.push(row?);
+    }
+    let has_more = rows.len() as i64 > limit;
+    rows.truncate(limit as usize);
+    let next_cursor = has_more
+        .then(|| rows.last().map(|(_, _, _, values)| search_cursor(sort, values)))
+        .flatten();
+
+    let mut issues: Vec<IssueCard> = rows.iter().map(|(card, ..)| card.clone()).collect();
     apply_spoilers(conn, &config, &mut issues)?;
-    let series_needle = format!("%{}%", query.trim());
-    let mut stmt = conn.prepare(
-        "SELECT s.id, s.title, s.publisher, s.universe, s.description,
-            (SELECT COUNT(*) FROM issues i WHERE i.series_id = s.id),
-            (SELECT COUNT(*) FROM issues i JOIN progress p ON p.issue_id = i.id
-             WHERE i.series_id = s.id AND p.status = 'completed'),
-            coalesce(s.cover_file_id,
-                (SELECT i.file_id FROM issues i WHERE i.series_id = s.id AND i.file_id IS NOT NULL
-                 ORDER BY i.sort_number LIMIT 1)),
-            s.cover_page, s.year, s.reading_direction
-         FROM series s WHERE s.title LIKE ?1 ORDER BY s.title COLLATE NOCASE LIMIT ?2",
+
+    let mut snippets = std::collections::BTreeMap::new();
+    for (index, (_, _, snippet, _)) in rows.iter().enumerate() {
+        let card = &issues[index];
+        // Snippets are generated after spoiler filtering: a protected issue must
+        // not leak a description excerpt.
+        if card.spoiler_protected || card.description.is_none() && snippet.is_empty() {
+            continue;
+        }
+        if !snippet.trim().is_empty() {
+            snippets.insert(card.id.clone(), snippet.trim().to_string());
+        }
+    }
+
+    let mut series = Vec::new();
+    if !filter.query.trim().is_empty() {
+        let needle = format!("%{}%", filter.query.trim());
+        let mut stmt = conn.prepare(
+            "SELECT s.id, s.title, s.publisher, s.universe, s.description,
+                (SELECT COUNT(*) FROM issues i WHERE i.series_id = s.id),
+                (SELECT COUNT(*) FROM issues i JOIN progress p ON p.issue_id = i.id
+                 WHERE i.series_id = s.id AND p.status = 'completed'),
+                coalesce(s.cover_file_id,
+                    (SELECT i.file_id FROM issues i WHERE i.series_id = s.id AND i.file_id IS NOT NULL
+                     ORDER BY i.sort_number LIMIT 1)),
+                s.cover_page, s.year, s.reading_direction, s.metadata_locked
+             FROM series s WHERE s.title LIKE ?1 ORDER BY s.title COLLATE NOCASE LIMIT 8",
+        )?;
+        let series_rows = stmt.query_map([needle], |row| {
+            Ok(SeriesSummary {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                publisher: row.get(2)?,
+                universe: row.get(3)?,
+                description: row.get(4)?,
+                issue_count: row.get(5)?,
+                read_count: row.get(6)?,
+                cover_file_id: row.get(7)?,
+                cover_page: row.get(8)?,
+                year: row.get(9)?,
+                reading_direction: row.get(10)?,
+                missing_count: 0,
+                metadata_locked: row.get::<_, i64>(11)? != 0,
+            })
+        })?;
+        series = series_rows.collect::<Result<Vec<_>, _>>()?;
+        fill_missing_counts(conn, &mut series)?;
+    }
+
+    let total = issues.len() as i64 + series.len() as i64;
+    Ok(SearchResult {
+        issues,
+        series,
+        total,
+        snippets,
+        next_cursor,
+    })
+}
+
+pub fn search(conn: &Connection, query: &str, limit: i64) -> AppResult<SearchResult> {
+    search_filtered(
+        conn,
+        &SearchFilter {
+            query: query.to_string(),
+            limit: Some(limit),
+            ..Default::default()
+        },
+    )
+}
+
+pub fn record_recent_search(conn: &Connection, query: &str) -> AppResult<()> {
+    let trimmed = query.trim();
+    if trimmed.len() < 2 {
+        return Ok(());
+    }
+    conn.execute(
+        "INSERT INTO recent_searches (query, searched_at) VALUES (?1, ?2)
+         ON CONFLICT(query) DO UPDATE SET searched_at = excluded.searched_at",
+        params![trimmed, now()],
     )?;
-    let series_rows = stmt.query_map(params![series_needle, limit], |row| {
-        Ok(SeriesSummary {
-            id: row.get(0)?,
-            title: row.get(1)?,
-            publisher: row.get(2)?,
-            universe: row.get(3)?,
-            description: row.get(4)?,
-            issue_count: row.get(5)?,
-            read_count: row.get(6)?,
-            cover_file_id: row.get(7)?,
-            cover_page: row.get(8)?,
-            year: row.get(9)?,
-            reading_direction: row.get(10)?,
-            missing_count: 0,
+    conn.execute(
+        "DELETE FROM recent_searches WHERE query NOT IN
+            (SELECT query FROM recent_searches ORDER BY searched_at DESC LIMIT 20)",
+        [],
+    )?;
+    Ok(())
+}
+
+pub fn recent_searches(conn: &Connection) -> AppResult<Vec<RecentSearch>> {
+    let mut stmt = conn.prepare(
+        "SELECT query, searched_at FROM recent_searches ORDER BY searched_at DESC LIMIT 10",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(RecentSearch {
+            query: row.get(0)?,
+            searched_at: row.get(1)?,
         })
     })?;
-    let mut series = series_rows.collect::<Result<Vec<_>, _>>()?;
-    fill_missing_counts(conn, &mut series)?;
-    let total = issues.len() as i64 + series.len() as i64;
-    Ok(SearchResult { issues, series, total })
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+pub fn clear_search_history(conn: &Connection) -> AppResult<()> {
+    conn.execute("DELETE FROM recent_searches", [])?;
+    Ok(())
 }
 
 pub fn suggestions(conn: &Connection, query: &str) -> AppResult<Vec<SearchSuggestion>> {
@@ -1309,10 +1866,12 @@ pub fn collections(conn: &Connection) -> AppResult<Vec<Collection>> {
     let mut stmt = conn.prepare(
         "SELECT c.id, c.name, c.description, c.cover_file_id,
             (SELECT COUNT(*) FROM collection_items ci WHERE ci.collection_id = c.id),
-            c.created_at
+            c.created_at, c.is_smart, c.smart_rules, c.sort_mode
          FROM collections c ORDER BY c.name COLLATE NOCASE",
     )?;
     let rows = stmt.query_map([], |row| {
+        let is_smart: i64 = row.get(6)?;
+        let rules: Option<String> = row.get(7)?;
         Ok(Collection {
             id: row.get(0)?,
             name: row.get(1)?,
@@ -1320,8 +1879,172 @@ pub fn collections(conn: &Connection) -> AppResult<Vec<Collection>> {
             cover_file_id: row.get(3)?,
             item_count: row.get(4)?,
             created_at: row.get(5)?,
+            is_smart: is_smart != 0,
+            smart_rules: rules.and_then(|raw| serde_json::from_str(&raw).ok()),
+            sort_mode: row.get(8)?,
         })
     })?;
+    let mut collections = rows.collect::<Result<Vec<_>, _>>()?;
+    // Smart collections have no stored items, so their counts come from the
+    // compiled rule query.
+    for collection in collections.iter_mut().filter(|entry| entry.is_smart) {
+        if let Some(rules) = collection.smart_rules.clone() {
+            collection.item_count = smart_collection_ids(conn, &rules)
+                .map(|ids| ids.len() as i64)
+                .unwrap_or(0);
+        } else {
+            collection.item_count = 0;
+        }
+    }
+    Ok(collections)
+}
+
+/// Field allowlist for smart rules. Only these fields can reach SQL.
+fn smart_rule_column(field: &str) -> Option<&'static str> {
+    Some(match field {
+        "title" => "i.title",
+        "number" => "i.number",
+        "series" => "s.title",
+        "publisher" => "i.publisher",
+        "universe" => "i.universe",
+        "writer" => "i.writer",
+        "artist" => "i.artist",
+        "coverArtist" => "i.cover_artist",
+        "edition" => "i.edition",
+        "releaseDate" => "i.release_date",
+        "year" => "substr(i.release_date, 1, 4)",
+        "status" => "coalesce(p.status, 'unread')",
+        "format" => "f.format",
+        "pages" => "coalesce(f.page_count, 0)",
+        "lastPage" => "coalesce(p.page, 0)",
+        _ => return None,
+    })
+}
+
+fn smart_rule_numeric(field: &str) -> bool {
+    matches!(field, "year" | "pages" | "lastPage")
+}
+
+fn like_value(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len() + 2);
+    for character in value.chars() {
+        if matches!(character, '%' | '_' | '\\') {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    format!("%{escaped}%")
+}
+
+fn compile_smart_rule(rule: &SmartRule, values: &mut Vec<String>) -> AppResult<String> {
+    let column = smart_rule_column(&rule.field)
+        .ok_or_else(|| AppError::invalid(format!("unknown smart rule field: {}", rule.field)))?;
+    let numeric = smart_rule_numeric(&rule.field);
+    let expr = if numeric { format!("CAST({column} AS REAL)") } else { column.to_string() };
+    let op = rule.op.as_str();
+    let sql = match op {
+        "isSet" => format!("({column} IS NOT NULL AND trim({column}) <> '')"),
+        "isEmpty" => format!("({column} IS NULL OR trim({column}) = '')"),
+        "contains" => {
+            values.push(like_value(&rule.value).to_lowercase());
+            format!("lower({column}) LIKE ? ESCAPE '\\'")
+        }
+        "startsWith" => {
+            values.push(format!("{}%", like_value(&rule.value).to_lowercase().trim_start_matches('%')));
+            format!("lower({column}) LIKE ? ESCAPE '\\'")
+        }
+        "eq" if numeric => {
+            let parsed = rule.value.trim().parse::<f64>().map_err(|_| {
+                AppError::invalid(format!("{} needs a number", rule.field))
+            })?;
+            values.push(parsed.to_string());
+            format!("{expr} = CAST(? AS REAL)")
+        }
+        "eq" => {
+            values.push(rule.value.clone());
+            format!("{column} = ?")
+        }
+        "ne" => {
+            values.push(rule.value.clone());
+            format!("coalesce({column}, '') <> ?")
+        }
+        "gt" | "gte" | "lt" | "lte" => {
+            let comparator = match op {
+                "gt" => ">",
+                "gte" => ">=",
+                "lt" => "<",
+                _ => "<=",
+            };
+            if numeric {
+                let parsed = rule.value.trim().parse::<f64>().map_err(|_| {
+                    AppError::invalid(format!("{} needs a number", rule.field))
+                })?;
+                values.push(parsed.to_string());
+                format!("{expr} {comparator} CAST(? AS REAL)")
+            } else {
+                values.push(rule.value.clone());
+                format!("{column} {comparator} ?")
+            }
+        }
+        _ => return Err(AppError::invalid(format!("unknown smart rule operator: {op}"))),
+    };
+    Ok(sql)
+}
+
+/// Compiles the fixed, typed rule set to SQL. Values are always bound, so no
+/// user text is ever interpolated. Empty rules match nothing on purpose.
+pub fn compile_smart_rules(rules: &SmartRules) -> AppResult<(String, Vec<String>)> {
+    if rules.is_empty() {
+        return Ok(("0 = 1".into(), Vec::new()));
+    }
+    let mut values = Vec::new();
+    let mut groups = Vec::new();
+    if !rules.all.is_empty() {
+        let mut parts = Vec::new();
+        for rule in &rules.all {
+            parts.push(compile_smart_rule(rule, &mut values)?);
+        }
+        groups.push(format!("({})", parts.join(" AND ")));
+    }
+    if !rules.any.is_empty() {
+        let mut parts = Vec::new();
+        for rule in &rules.any {
+            parts.push(compile_smart_rule(rule, &mut values)?);
+        }
+        groups.push(format!("({})", parts.join(" OR ")));
+    }
+    Ok((groups.join(" AND "), values))
+}
+
+fn smart_sort_clause(sort_mode: &str) -> &'static str {
+    match sort_mode {
+        "title" => "i.title COLLATE NOCASE ASC",
+        "series" => "s.title COLLATE NOCASE ASC, i.sort_number ASC",
+        "added_desc" => "i.created_at DESC",
+        "added_asc" => "i.created_at ASC",
+        "release_date" => "CASE WHEN i.release_date IS NULL THEN 1 ELSE 0 END, i.release_date ASC",
+        _ => "s.title COLLATE NOCASE ASC, i.sort_number ASC, i.title COLLATE NOCASE",
+    }
+}
+
+fn valid_sort_mode(sort_mode: &str) -> bool {
+    matches!(
+        sort_mode,
+        "manual" | "title" | "series" | "added_desc" | "added_asc" | "release_date"
+    )
+}
+
+fn smart_collection_ids(conn: &Connection, rules: &SmartRules) -> AppResult<Vec<String>> {
+    let (where_sql, values) = compile_smart_rules(rules)?;
+    let sql = format!(
+        "SELECT i.id FROM issues i
+         LEFT JOIN series s ON s.id = i.series_id
+         LEFT JOIN library_files f ON f.id = i.file_id
+         LEFT JOIN progress p ON p.issue_id = i.id
+         WHERE {where_sql}"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params_from_iter(values.iter()), |row| row.get::<_, String>(0))?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
@@ -1331,17 +2054,33 @@ pub fn collection_detail(conn: &Connection, collection_id: &str) -> AppResult<Co
         .into_iter()
         .find(|collection| collection.id == collection_id)
         .ok_or_else(|| AppError::not_found("collection"))?;
-    let sql = format!(
-        "SELECT {DISPLAY_FIELDS} FROM collection_items ci
-         JOIN issues i ON i.id = ci.issue_id
-         LEFT JOIN series s ON s.id = i.series_id
-         LEFT JOIN library_files f ON f.id = i.file_id
-         LEFT JOIN progress p ON p.issue_id = i.id
-         WHERE ci.collection_id = ?1 ORDER BY ci.position"
-    );
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map([collection_id], library::map_issue)?;
-    let mut issues = rows.collect::<Result<Vec<_>, _>>()?;
+    let mut issues = if collection.is_smart {
+        let rules = collection.smart_rules.clone().unwrap_or_default();
+        let (where_sql, values) = compile_smart_rules(&rules)?;
+        let sql = format!(
+            "{} WHERE {where_sql} ORDER BY {}",
+            issue_select(),
+            smart_sort_clause(&collection.sort_mode)
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            params_from_iter(values.iter()),
+            library::map_issue,
+        )?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    } else {
+        let sql = format!(
+            "SELECT {DISPLAY_FIELDS} FROM collection_items ci
+             JOIN issues i ON i.id = ci.issue_id
+             LEFT JOIN series s ON s.id = i.series_id
+             LEFT JOIN library_files f ON f.id = i.file_id
+             LEFT JOIN progress p ON p.issue_id = i.id
+             WHERE ci.collection_id = ?1 ORDER BY ci.position"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([collection_id], library::map_issue)?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
     apply_spoilers(conn, &config, &mut issues)?;
     Ok(CollectionDetail { collection, items: issues })
 }
@@ -1361,21 +2100,91 @@ pub fn create_collection(conn: &Connection, name: &str, description: Option<&str
         cover_file_id: None,
         item_count: 0,
         created_at: timestamp,
+        is_smart: false,
+        smart_rules: None,
+        sort_mode: "manual".into(),
     })
+}
+
+/// Creates a smart collection from a typed rule set. Rules are validated up
+/// front so a bad field/operator is reported at save time, not on every read.
+pub fn create_smart_collection(
+    conn: &Connection,
+    name: &str,
+    description: Option<&str>,
+    rules: &SmartRules,
+    sort_mode: Option<&str>,
+) -> AppResult<Collection> {
+    if name.trim().is_empty() {
+        return Err(AppError::invalid("collection name is required"));
+    }
+    compile_smart_rules(rules)?;
+    let sort_mode = sort_mode
+        .filter(|mode| valid_sort_mode(mode))
+        .unwrap_or("series");
+    let id = new_id();
+    let timestamp = now();
+    conn.execute(
+        "INSERT INTO collections
+            (id, name, description, is_smart, smart_rules, sort_mode, created_at, updated_at)
+         VALUES (?1, ?2, ?3, 1, ?4, ?5, ?6, ?6)",
+        params![
+            id,
+            name.trim(),
+            description,
+            serde_json::to_string(rules).map_err(|err| AppError::message(err.to_string()))?,
+            sort_mode,
+            timestamp
+        ],
+    )?;
+    collections(conn)?
+        .into_iter()
+        .find(|collection| collection.id == id)
+        .ok_or_else(|| AppError::not_found("collection"))
 }
 
 pub fn update_collection(
     conn: &Connection,
     collection_id: &str,
-    name: Option<&str>,
-    description: Option<&str>,
-    cover_file_id: Option<&str>,
+    patch: &CollectionPatch,
 ) -> AppResult<Collection> {
+    if patch.name.as_ref().is_some_and(|name| name.trim().is_empty()) {
+        return Err(AppError::invalid("collection name is required"));
+    }
+    if let Some(rules) = patch.smart_rules.as_ref() {
+        compile_smart_rules(rules)?;
+    }
+    if patch.sort_mode.as_ref().is_some_and(|mode| !valid_sort_mode(mode)) {
+        return Err(AppError::invalid("unknown collection sort mode"));
+    }
+    let rules_json = patch
+        .smart_rules
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|err| AppError::message(err.to_string()))?;
+    let is_smart = patch.is_smart.map(i64::from);
     conn.execute(
-        "UPDATE collections SET name = coalesce(?2, name), description = coalesce(?3, description),
+        "UPDATE collections SET
+            name = coalesce(?2, name),
+            description = coalesce(?3, description),
             cover_file_id = coalesce(?4, cover_file_id),
-            updated_at = ?5 WHERE id = ?1",
-        params![collection_id, name, description, cover_file_id, now()],
+            is_smart = coalesce(?6, is_smart),
+            smart_rules = CASE WHEN ?7 THEN ?8 ELSE smart_rules END,
+            sort_mode = coalesce(?9, sort_mode),
+            updated_at = ?5
+         WHERE id = ?1",
+        params![
+            collection_id,
+            patch.name.as_deref().map(str::trim),
+            patch.description.as_deref(),
+            patch.cover_file_id.as_deref(),
+            now(),
+            is_smart,
+            patch.smart_rules.is_some(),
+            rules_json,
+            patch.sort_mode.as_deref(),
+        ],
     )?;
     collections(conn)?
         .into_iter()
@@ -1389,6 +2198,18 @@ pub fn delete_collection(conn: &Connection, collection_id: &str) -> AppResult<()
 }
 
 pub fn add_to_collection(conn: &mut Connection, collection_id: &str, issue_ids: &[String]) -> AppResult<()> {
+    let is_smart: Option<i64> = conn
+        .query_row(
+            "SELECT is_smart FROM collections WHERE id = ?1",
+            [collection_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if is_smart == Some(1) {
+        return Err(AppError::invalid(
+            "smart collections are built from rules; edit the rules to change membership",
+        ));
+    }
     let tx = conn.transaction()?;
     let max: f64 = tx
         .query_row(
@@ -1527,16 +2348,82 @@ pub fn reveal_spoiler(conn: &Connection, issue_id: &str) -> AppResult<()> {
 pub fn record_session(conn: &Connection, issue_id: &str, pages: i64, seconds: i64) -> AppResult<()> {
     let ended = chrono::Utc::now();
     let started = ended - chrono::Duration::seconds(seconds.max(1));
+    let last_page: i64 = conn
+        .query_row(
+            "SELECT coalesce(page, 0) FROM progress WHERE issue_id = ?1",
+            [issue_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(0);
     conn.execute(
-        "INSERT INTO reading_sessions (id, issue_id, started_at, ended_at, pages)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
+        "INSERT INTO reading_sessions
+            (id, issue_id, started_at, ended_at, pages, last_page, status)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'closed')",
         params![
             new_id(),
             issue_id,
             started.to_rfc3339(),
             ended.to_rfc3339(),
-            pages
+            pages,
+            last_page
         ],
+    )?;
+    Ok(())
+}
+
+/// Opens a reading session. It stays `open` until `close_session` is called, so a
+/// crash or forced quit leaves it discoverable as an interrupted session.
+pub fn start_session(conn: &Connection, issue_id: &str, page: i64) -> AppResult<String> {
+    let id = new_id();
+    let timestamp = now();
+    conn.execute(
+        "INSERT INTO reading_sessions
+            (id, issue_id, started_at, ended_at, pages, last_page, status)
+         VALUES (?1, ?2, ?3, ?3, 0, ?4, 'open')",
+        params![id, issue_id, timestamp, page.max(0)],
+    )?;
+    Ok(id)
+}
+
+/// Heartbeat for an open session. `ended_at` is bumped so a stale open session
+/// still reports roughly when reading stopped.
+pub fn touch_session(
+    conn: &Connection,
+    session_id: &str,
+    pages: i64,
+    last_page: i64,
+) -> AppResult<()> {
+    conn.execute(
+        "UPDATE reading_sessions
+         SET pages = ?2, last_page = ?3, ended_at = ?4
+         WHERE id = ?1 AND status = 'open'",
+        params![session_id, pages.max(0), last_page.max(0), now()],
+    )?;
+    Ok(())
+}
+
+pub fn close_session(
+    conn: &Connection,
+    session_id: &str,
+    pages: i64,
+    last_page: i64,
+) -> AppResult<()> {
+    conn.execute(
+        "UPDATE reading_sessions
+         SET pages = ?2, last_page = ?3, ended_at = ?4, status = 'closed'
+         WHERE id = ?1",
+        params![session_id, pages.max(0), last_page.max(0), now()],
+    )?;
+    Ok(())
+}
+
+pub fn resume_session(conn: &Connection, session_id: &str) -> AppResult<()> {
+    conn.execute(
+        "UPDATE reading_sessions
+         SET status = 'closed', resumed_at = ?2
+         WHERE id = ?1 AND status = 'open'",
+        params![session_id, now()],
     )?;
     Ok(())
 }
@@ -1544,29 +2431,37 @@ pub fn record_session(conn: &Connection, issue_id: &str, pages: i64, seconds: i6
 pub fn reading_history(conn: &Connection, limit: i64) -> AppResult<HistoryPayload> {
     let config = settings(conn)?;
     let limit = limit.clamp(1, 500);
-    let mut stmt = conn.prepare(
+    let session_sql =
         "SELECT rs.id, rs.issue_id, i.title, s.title, i.number, i.file_id,
-                rs.started_at, rs.ended_at, rs.pages
+                rs.started_at, rs.ended_at, rs.pages, rs.last_page, rs.status, rs.resumed_at
          FROM reading_sessions rs
          JOIN issues i ON i.id = rs.issue_id
-         LEFT JOIN series s ON s.id = i.series_id
-         ORDER BY rs.ended_at DESC LIMIT ?1",
-    )?;
-    let sessions = stmt
-        .query_map([limit], |row| {
-            Ok(HistorySession {
-                id: row.get(0)?,
-                issue_id: row.get(1)?,
-                title: row.get(2)?,
-                series_title: row.get(3)?,
-                number: row.get(4)?,
-                file_id: row.get(5)?,
-                started_at: row.get(6)?,
-                ended_at: row.get(7)?,
-                pages: row.get(8)?,
-            })
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
+         LEFT JOIN series s ON s.id = i.series_id";
+    let mut stmt = conn.prepare(&format!(
+        "{session_sql} WHERE rs.status <> 'open' ORDER BY rs.ended_at DESC LIMIT ?1"
+    ))?;
+    let map_session = |row: &rusqlite::Row<'_>| {
+        Ok(HistorySession {
+            id: row.get(0)?,
+            issue_id: row.get(1)?,
+            title: row.get(2)?,
+            series_title: row.get(3)?,
+            number: row.get(4)?,
+            file_id: row.get(5)?,
+            started_at: row.get(6)?,
+            ended_at: row.get(7)?,
+            pages: row.get(8)?,
+            last_page: row.get(9)?,
+            status: row.get(10)?,
+            resumed_at: row.get(11)?,
+        })
+    };
+    let sessions = stmt.query_map([limit], map_session)?.collect::<Result<Vec<_>, _>>()?;
+
+    let mut stmt = conn.prepare(&format!(
+        "{session_sql} WHERE rs.status = 'open' ORDER BY rs.started_at DESC LIMIT ?1"
+    ))?;
+    let interrupted = stmt.query_map([limit], map_session)?.collect::<Result<Vec<_>, _>>()?;
 
     let sql = format!(
         "{} WHERE p.last_read_at IS NOT NULL AND p.status <> 'unread'
@@ -1578,7 +2473,7 @@ pub fn reading_history(conn: &Connection, limit: i64) -> AppResult<HistoryPayloa
     let mut recent = rows.collect::<Result<Vec<_>, _>>()?;
     apply_spoilers(conn, &config, &mut recent)?;
 
-    Ok(HistoryPayload { sessions, recent })
+    Ok(HistoryPayload { sessions, interrupted, recent })
 }
 
 pub fn stats(conn: &Connection) -> AppResult<Stats> {
@@ -1698,6 +2593,19 @@ pub fn cover_bytes(
     archive::thumbnail(&data, max_width)
 }
 
+/// Page bytes at a bounded width, used for the optional high-resolution
+/// re-request when zoomed in. Returns JPEG because the result is re-encoded.
+pub fn page_bytes_scaled(
+    conn: &Connection,
+    file_id: &str,
+    page: i64,
+    max_width: u32,
+) -> AppResult<(Vec<u8>, String)> {
+    let (data, _) = page_bytes(conn, file_id, page)?;
+    let scaled = archive::thumbnail(&data, max_width.clamp(320, 8192))?;
+    Ok((scaled, "image/jpeg".into()))
+}
+
 pub fn page_bytes(conn: &Connection, file_id: &str, page: i64) -> AppResult<(Vec<u8>, String)> {
     let (path, format): (String, String) = conn.query_row(
         "SELECT path, format FROM library_files WHERE id = ?1",
@@ -1777,4 +2685,510 @@ pub fn set_series_status(conn: &mut Connection, series_id: &str, status: &str) -
         set_status(conn, id, status)?;
     }
     Ok(ids.len() as i64)
+}
+
+// ---------------------------------------------------------------------------
+// Unmatched files (ARCHITECTURE.md §10.7)
+//
+// A library file with no issue pointing at it stays browsable and readable,
+// with its own progress and bookmarks in `file_progress` / `file_bookmarks`.
+// Matching it later creates the issue or attaches it to an existing one while
+// reusing the same `library_files` row, so nothing is re-imported and resume
+// position/bookmarks survive the match.
+// ---------------------------------------------------------------------------
+
+fn file_display_name(path: &str) -> String {
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    name.rsplit_once('.').map(|(stem, _)| stem).unwrap_or(name).to_string()
+}
+
+pub fn unmatched_files(conn: &Connection) -> AppResult<Vec<UnmatchedFile>> {
+    let mut stmt = conn.prepare(
+        "SELECT f.id, f.root_id, f.path, f.relative_path, f.format, f.size_bytes,
+                f.page_count, f.status, f.added_at,
+                coalesce(fp.page, 0), coalesce(fp.status, 'unread'), fp.last_read_at
+         FROM library_files f
+         LEFT JOIN file_progress fp ON fp.file_id = f.id
+         WHERE NOT EXISTS (SELECT 1 FROM issues i WHERE i.file_id = f.id)
+         ORDER BY f.added_at DESC, f.relative_path COLLATE NOCASE",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let path: String = row.get(2)?;
+        let parsed = metadata::parse_filename(&file_display_name(&path));
+        Ok(UnmatchedFile {
+            id: row.get(0)?,
+            root_id: row.get(1)?,
+            path,
+            relative_path: row.get(3)?,
+            format: row.get(4)?,
+            size_bytes: row.get(5)?,
+            page_count: row.get(6)?,
+            status: row.get(7)?,
+            added_at: row.get(8)?,
+            page: row.get(9)?,
+            progress_status: row.get(10)?,
+            last_read_at: row.get(11)?,
+            suggested_series: parsed.series,
+            suggested_number: parsed.number,
+            suggested_title: String::new(),
+        })
+    })?;
+    let mut files = rows.collect::<Result<Vec<_>, _>>()?;
+    for file in files.iter_mut() {
+        file.suggested_title = if file.suggested_number.is_empty() {
+            file.suggested_series.clone()
+        } else {
+            format!("{} #{}", file.suggested_series, file.suggested_number)
+        };
+    }
+    Ok(files)
+}
+
+pub fn file_proposal(conn: &Connection, file_id: &str) -> AppResult<FileProposal> {
+    let (path, format, page_count): (String, String, i64) = conn
+        .query_row(
+            "SELECT path, format, page_count FROM library_files WHERE id = ?1",
+            [file_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?
+        .ok_or_else(|| AppError::not_found("file"))?;
+    let proposed = library::propose_metadata(std::path::Path::new(&path), &file_display_name(&path));
+    Ok(FileProposal {
+        file_id: file_id.to_string(),
+        file_path: path,
+        format,
+        page_count,
+        series_title: proposed.series_title,
+        title: proposed.title,
+        number: proposed.number,
+        volume: proposed.volume,
+        publisher: proposed.publisher,
+        release_date: proposed.release_date,
+        writer: proposed.writer,
+        artist: proposed.artist,
+        cover_artist: proposed.cover_artist,
+        description: proposed.description,
+    })
+}
+
+/// True when no issue references this file yet.
+fn is_unmatched(conn: &Connection, file_id: &str) -> AppResult<bool> {
+    let exists: i64 = conn.query_row(
+        "SELECT count(*) FROM library_files WHERE id = ?1",
+        [file_id],
+        |row| row.get(0),
+    )?;
+    if exists == 0 {
+        return Err(AppError::not_found("file"));
+    }
+    let mapped: i64 = conn.query_row(
+        "SELECT count(*) FROM issues WHERE file_id = ?1",
+        [file_id],
+        |row| row.get(0),
+    )?;
+    Ok(mapped == 0)
+}
+
+/// Moves file-scoped progress and bookmarks onto the issue that now owns the
+/// file. The rows are migrated in place so a resume position survives matching.
+fn adopt_file_progress(tx: &Connection, file_id: &str, issue_id: &str) -> AppResult<()> {
+    let page_count: i64 = tx.query_row(
+        "SELECT page_count FROM library_files WHERE id = ?1",
+        [file_id],
+        |row| row.get(0),
+    )?;
+    tx.execute(
+        "INSERT INTO progress
+            (issue_id, page, total, status, started_at, completed_at, last_read_at, updated_at, scroll_offset)
+         SELECT ?2, page, max(total, ?3), status, started_at, completed_at, last_read_at, updated_at, scroll_offset
+         FROM file_progress WHERE file_id = ?1
+         ON CONFLICT(issue_id) DO UPDATE SET
+            page = excluded.page,
+            total = excluded.total,
+            status = excluded.status,
+            started_at = coalesce(progress.started_at, excluded.started_at),
+            completed_at = coalesce(progress.completed_at, excluded.completed_at),
+            last_read_at = coalesce(excluded.last_read_at, progress.last_read_at),
+            updated_at = excluded.updated_at,
+            scroll_offset = excluded.scroll_offset",
+        params![file_id, issue_id, page_count],
+    )?;
+    tx.execute("DELETE FROM file_progress WHERE file_id = ?1", [file_id])?;
+    tx.execute(
+        "INSERT INTO bookmarks (id, issue_id, page, label, note, created_at)
+         SELECT id, ?2, page, label, note, created_at FROM file_bookmarks WHERE file_id = ?1",
+        params![file_id, issue_id],
+    )?;
+    tx.execute("DELETE FROM file_bookmarks WHERE file_id = ?1", [file_id])?;
+    Ok(())
+}
+
+/// Creates a new issue owned by `file_id` and adopts the file's progress.
+/// The file record is never recreated; only the mapping is added.
+pub fn match_file_to_new_issue(
+    conn: &mut Connection,
+    file_id: &str,
+    patch: &MatchFilePatch,
+) -> AppResult<IssueCard> {
+    if !is_unmatched(conn, file_id)? {
+        return Err(AppError::invalid("file is already matched to an issue"));
+    }
+    let proposal = file_proposal(conn, file_id)?;
+    let series_title = patch
+        .series_title
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(&proposal.series_title)
+        .to_string();
+    let title = patch
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            let number = patch.number.clone().unwrap_or_else(|| proposal.number.clone());
+            if number.is_empty() {
+                series_title.clone()
+            } else {
+                format!("{series_title} #{number}")
+            }
+        });
+    let number = patch.number.clone().unwrap_or_else(|| proposal.number.clone());
+    let sort_number = metadata::parse_number(&number);
+    let publisher = patch.publisher.clone().or(proposal.publisher.clone());
+
+    let tx = conn.transaction()?;
+    let timestamp = now();
+    let series_id = match patch.series_id.as_deref().filter(|value| !value.is_empty()) {
+        Some(id) => id.to_string(),
+        None => library::ensure_series(&tx, &series_title, publisher.as_deref())?.0,
+    };
+    let issue_id = new_id();
+    tx.execute(
+        "INSERT INTO issues
+            (id, file_id, series_id, title, number, sort_number, volume, publisher, universe,
+             release_date, writer, artist, cover_artist, description, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, ?9, ?10, ?11, ?12, ?13, ?14, ?14)",
+        params![
+            issue_id,
+            file_id,
+            series_id,
+            title,
+            number,
+            sort_number,
+            patch.volume.clone().or(proposal.volume.clone()),
+            publisher,
+            patch.release_date.clone().or(proposal.release_date.clone()),
+            patch.writer.clone().or(proposal.writer.clone()),
+            patch.artist.clone().or(proposal.artist.clone()),
+            patch.cover_artist.clone().or(proposal.cover_artist.clone()),
+            patch.description.clone().or(proposal.description.clone()),
+            timestamp
+        ],
+    )?;
+    adopt_file_progress(&tx, file_id, &issue_id)?;
+    tx.commit()?;
+    issue(conn, &issue_id)
+}
+
+/// Attaches an unmatched file to an existing issue that has no file yet.
+pub fn match_file_to_existing_issue(
+    conn: &mut Connection,
+    file_id: &str,
+    issue_id: &str,
+) -> AppResult<IssueCard> {
+    if !is_unmatched(conn, file_id)? {
+        return Err(AppError::invalid("file is already matched to an issue"));
+    }
+    let existing_file: Option<String> = conn
+        .query_row("SELECT file_id FROM issues WHERE id = ?1", [issue_id], |row| row.get(0))
+        .optional()?
+        .ok_or_else(|| AppError::not_found("issue"))?;
+    if existing_file.is_some() {
+        return Err(AppError::invalid("issue already has a file"));
+    }
+    let tx = conn.transaction()?;
+    tx.execute(
+        "UPDATE issues SET file_id = ?2, updated_at = ?3 WHERE id = ?1",
+        params![issue_id, file_id, now()],
+    )?;
+    adopt_file_progress(&tx, file_id, issue_id)?;
+    tx.commit()?;
+    issue(conn, issue_id)
+}
+
+/// Issues that have no file and can adopt an unmatched one.
+pub fn fileless_issues(conn: &Connection) -> AppResult<Vec<IssueCard>> {
+    let sql = format!(
+        "{} WHERE i.file_id IS NULL ORDER BY s.title COLLATE NOCASE, i.sort_number",
+        issue_select()
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], library::map_issue)?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+pub fn file_progress(conn: &Connection, file_id: &str) -> AppResult<FileProgressState> {
+    let page_count: i64 = conn.query_row(
+        "SELECT page_count FROM library_files WHERE id = ?1",
+        [file_id],
+        |row| row.get(0),
+    ).optional()?.ok_or_else(|| AppError::not_found("file"))?;
+    conn.query_row(
+        "SELECT page, total, status, started_at, completed_at, updated_at, coalesce(scroll_offset, 0)
+         FROM file_progress WHERE file_id = ?1",
+        [file_id],
+        |row| {
+            Ok(FileProgressState {
+                page: row.get(0)?,
+                total: row.get(1)?,
+                status: row.get(2)?,
+                started_at: row.get(3)?,
+                completed_at: row.get(4)?,
+                updated_at: row.get(5)?,
+                scroll_offset: row.get(6)?,
+            })
+        },
+    )
+    .optional()?
+    .map(Ok)
+    .unwrap_or(Ok(FileProgressState {
+        page: 0,
+        total: page_count,
+        status: "unread".into(),
+        started_at: None,
+        completed_at: None,
+        updated_at: None,
+        scroll_offset: 0.0,
+    }))
+}
+
+pub fn save_file_progress(
+    conn: &mut Connection,
+    file_id: &str,
+    page: i64,
+    offset: Option<f64>,
+) -> AppResult<FileProgressState> {
+    let config = settings(conn)?;
+    let page_count: i64 = conn.query_row(
+        "SELECT page_count FROM library_files WHERE id = ?1",
+        [file_id],
+        |row| row.get(0),
+    ).optional()?.ok_or_else(|| AppError::not_found("file"))?;
+    let total = page_count.max(0);
+    let page = page.clamp(0, (total - 1).max(0));
+    let ratio = if total > 0 { (page as f64 + 1.0) / total as f64 } else { 0.0 };
+    let old_status: String = conn
+        .query_row("SELECT status FROM file_progress WHERE file_id = ?1", [file_id], |row| row.get(0))
+        .optional()?
+        .unwrap_or_else(|| "unread".into());
+    let status = if old_status == "completed" || ratio >= config.completion_threshold {
+        "completed"
+    } else if page > 0 {
+        "in-progress"
+    } else {
+        old_status.as_str()
+    };
+    let timestamp = now();
+    let completed_at = if status == "completed" { Some(timestamp.clone()) } else { None };
+    let stored_offset: f64 = conn
+        .query_row("SELECT coalesce(scroll_offset, 0) FROM file_progress WHERE file_id = ?1", [file_id], |row| row.get(0))
+        .optional()?
+        .unwrap_or(0.0);
+    let scroll_offset = offset.map(|value| value.clamp(0.0, 1.0)).unwrap_or(stored_offset);
+    conn.execute(
+        "INSERT INTO file_progress
+            (file_id, page, total, status, started_at, completed_at, last_read_at, updated_at, scroll_offset)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?5, ?5, ?7)
+         ON CONFLICT(file_id) DO UPDATE SET
+            page = excluded.page,
+            total = excluded.total,
+            status = excluded.status,
+            started_at = coalesce(file_progress.started_at, excluded.started_at),
+            completed_at = coalesce(excluded.completed_at, file_progress.completed_at),
+            last_read_at = excluded.last_read_at,
+            updated_at = excluded.updated_at,
+            scroll_offset = excluded.scroll_offset",
+        params![file_id, page, total, status, timestamp, completed_at, scroll_offset],
+    )?;
+    file_progress(conn, file_id)
+}
+
+pub fn file_bookmarks(conn: &Connection, file_id: &str) -> AppResult<Vec<serde_json::Value>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, page, label, note, created_at FROM file_bookmarks WHERE file_id = ?1 ORDER BY page",
+    )?;
+    let rows = stmt.query_map([file_id], |row| {
+        Ok(serde_json::json!({
+            "id": row.get::<_, String>(0)?,
+            "page": row.get::<_, i64>(1)?,
+            "label": row.get::<_, Option<String>>(2)?,
+            "note": row.get::<_, Option<String>>(3)?,
+            "createdAt": row.get::<_, String>(4)?,
+        }))
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+pub fn add_file_bookmark(
+    conn: &Connection,
+    file_id: &str,
+    page: i64,
+    label: Option<&str>,
+    note: Option<&str>,
+) -> AppResult<serde_json::Value> {
+    let id = new_id();
+    let timestamp = now();
+    conn.execute(
+        "INSERT INTO file_bookmarks (id, file_id, page, label, note, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![id, file_id, page, label, note, timestamp],
+    )?;
+    Ok(serde_json::json!({
+        "id": id, "page": page, "label": label, "note": note, "createdAt": timestamp,
+    }))
+}
+
+pub fn update_file_bookmark_note(
+    conn: &Connection,
+    id: &str,
+    note: Option<&str>,
+) -> AppResult<serde_json::Value> {
+    let updated = conn.execute(
+        "UPDATE file_bookmarks SET note = ?2 WHERE id = ?1",
+        params![id, note],
+    )?;
+    if updated == 0 {
+        return Err(AppError::not_found("bookmark"));
+    }
+    conn.query_row(
+        "SELECT id, page, label, note, created_at FROM file_bookmarks WHERE id = ?1",
+        [id],
+        |row| {
+            Ok(serde_json::json!({
+                "id": row.get::<_, String>(0)?,
+                "page": row.get::<_, i64>(1)?,
+                "label": row.get::<_, Option<String>>(2)?,
+                "note": row.get::<_, Option<String>>(3)?,
+                "createdAt": row.get::<_, String>(4)?,
+            }))
+        },
+    ).map_err(Into::into)
+}
+
+pub fn delete_file_bookmark(conn: &Connection, id: &str) -> AppResult<()> {
+    conn.execute("DELETE FROM file_bookmarks WHERE id = ?1", [id])?;
+    Ok(())
+}
+
+pub fn set_file_spread_offset(conn: &Connection, file_id: &str, offset: i64) -> AppResult<i64> {
+    let offset = offset.rem_euclid(2);
+    conn.execute(
+        "INSERT INTO file_preferences (file_id, spread_offset, updated_at)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(file_id) DO UPDATE SET spread_offset = excluded.spread_offset,
+            updated_at = excluded.updated_at",
+        params![file_id, offset, now()],
+    )?;
+    Ok(offset)
+}
+
+pub fn set_file_direction_override(
+    conn: &Connection,
+    file_id: &str,
+    direction: Option<&str>,
+) -> AppResult<Option<String>> {
+    if let Some(value) = direction
+        && value != "ltr"
+        && value != "rtl"
+    {
+        return Err(AppError::invalid("reading direction must be ltr or rtl"));
+    }
+    conn.execute(
+        "INSERT INTO file_preferences (file_id, spread_offset, reading_direction, updated_at)
+         VALUES (?1, 0, ?2, ?3)
+         ON CONFLICT(file_id) DO UPDATE SET reading_direction = excluded.reading_direction,
+            updated_at = excluded.updated_at",
+        params![file_id, direction, now()],
+    )?;
+    Ok(direction.map(str::to_string))
+}
+
+/// Reader payload for a file that is not (yet) an issue. Mirrors
+/// `reader_payload` so the same reader component can open loose files.
+pub fn file_reader_payload(conn: &Connection, file_id: &str) -> AppResult<ReaderPayload> {
+    let config = settings(conn)?;
+    let (path, _format, page_count): (String, String, i64) = conn
+        .query_row(
+            "SELECT path, format, page_count FROM library_files WHERE id = ?1",
+            [file_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?
+        .ok_or_else(|| AppError::not_found("file"))?;
+    let mut stmt = conn.prepare(
+        "SELECT page_index, entry_name, width, height FROM file_pages
+         WHERE file_id = ?1 ORDER BY page_index",
+    )?;
+    let rows = stmt.query_map([file_id], |row| {
+        Ok(PageInfo {
+            index: row.get(0)?,
+            name: row.get(1)?,
+            width: row.get(2)?,
+            height: row.get(3)?,
+        })
+    })?;
+    let pages = rows.collect::<Result<Vec<_>, _>>()?;
+    if pages.is_empty() {
+        return Err(AppError::invalid("no pages found in archive"));
+    }
+    let progress = file_progress(conn, file_id)?;
+    let spread_offset: i64 = conn
+        .query_row(
+            "SELECT spread_offset FROM file_preferences WHERE file_id = ?1",
+            [file_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(0);
+    let reading_direction = conn
+        .query_row(
+            "SELECT reading_direction FROM file_preferences WHERE file_id = ?1",
+            [file_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten()
+        .unwrap_or(config.reading_direction);
+    let title = file_display_name(&path);
+    Ok(ReaderPayload {
+        file_id: file_id.to_string(),
+        issue_id: None,
+        title,
+        series_title: None,
+        number: String::new(),
+        pages,
+        progress: ProgressState {
+            page: progress.page,
+            total: if progress.total > 0 { progress.total } else { page_count },
+            status: progress.status,
+            started_at: progress.started_at,
+            completed_at: progress.completed_at,
+            updated_at: progress.updated_at,
+            scroll_offset: progress.scroll_offset,
+        },
+        background: config.background,
+        mode: config.default_mode,
+        reading_direction,
+        fit: config.default_fit,
+        transition: config.transition,
+        transition_duration: config.transition_duration,
+        show_interface: config.show_interface,
+        next_issue_id: None,
+        previous_issue_id: None,
+        spread_offset,
+    })
 }

@@ -3,6 +3,7 @@ import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api, pageUrl } from "../lib/api";
 import type { FitMode, ReaderMode, TransitionMode } from "../lib/types";
+import { offsetWithin, scrollPositionFor } from "../lib/scroll";
 import {
   cx,
   eventMatches,
@@ -25,7 +26,10 @@ const MODES: ReaderMode[] = ["single", "double", "vertical", "horizontal"];
 const FITS: FitMode[] = ["page", "width", "height", "original"];
 
 export default function ReaderPage() {
-  const { issueId = "" } = useParams();
+  const { issueId: issueParam = "", fileId: fileParam = "" } = useParams();
+  const fileMode = Boolean(fileParam);
+  const issueId = issueParam;
+  const readerKey = fileMode ? fileParam : issueParam;
   const [searchParams] = useSearchParams();
   const activeOrder = searchParams.get("order");
   const navigate = useNavigate();
@@ -34,9 +38,17 @@ export default function ReaderPage() {
   const settings = useSettings((state) => state.settings);
 
   const query = useQuery({
-    queryKey: ["reader", issueId],
-    queryFn: () => api.readerPayload(issueId),
-    enabled: Boolean(issueId),
+    queryKey: [fileMode ? "file-reader" : "reader", readerKey],
+    queryFn: () =>
+      fileMode ? api.fileReaderPayload(fileParam) : api.readerPayload(issueId),
+    enabled: Boolean(readerKey),
+    staleTime: Infinity,
+  });
+
+  const variantsQuery = useQuery({
+    queryKey: ["issue-variants", issueId],
+    queryFn: () => api.issueVariants(issueId),
+    enabled: Boolean(issueId) && !fileMode,
     staleTime: Infinity,
   });
 
@@ -58,21 +70,40 @@ export default function ReaderPage() {
   const [bookmarkNote, setBookmarkNote] = useState("");
   const [editingNoteId, setEditingNoteId] = useState<string | null>(null);
   const [noteDraft, setNoteDraft] = useState("");
+  const [compareId, setCompareId] = useState<string | null>(
+    searchParams.get("compare"),
+  );
+  const [compareOpen, setCompareOpen] = useState(Boolean(searchParams.get("compare")));
+  const [comparePage, setComparePage] = useState(0);
+
+  const compareQuery = useQuery({
+    queryKey: ["compare", compareId],
+    queryFn: () => api.readerPayload(compareId as string),
+    enabled: Boolean(compareId),
+    staleTime: Infinity,
+  });
+
 
   const viewportRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
-  const sessionStart = useRef(0);
   const pagesVisited = useRef(0);
   const persistTimer = useRef<number | null>(null);
+  const sessionRef = useRef<string | null>(null);
+  const pageRef = useRef(0);
 
   const zoom = useReaderZoom(viewportRef);
 
   // Initialise reader state once per loaded payload using React's documented
   // "adjust state when props change" pattern rather than an effect.
   const [appliedPayload, setAppliedPayload] = useState<string | null>(null);
+  const pageParam = Number(searchParams.get("page"));
   if (query.data && appliedPayload !== query.data.fileId + String(query.data.progress.page)) {
     setAppliedPayload(query.data.fileId + String(query.data.progress.page));
-    setPage(query.data.progress.page ?? 0);
+    setPage(
+      Number.isFinite(pageParam) && pageParam > 0
+        ? Math.min(pageParam - 1, Math.max(0, query.data.pages.length - 1))
+        : query.data.progress.page ?? 0,
+    );
     setMode(query.data.mode);
     setFit(query.data.fit);
     setTransition(query.data.transition);
@@ -82,9 +113,56 @@ export default function ReaderPage() {
   }
 
   useEffect(() => {
+    pageRef.current = page;
+  }, [page]);
+
+  useEffect(() => {
     pagesVisited.current = 0;
-    sessionStart.current = Date.now();
-  }, [issueId]);
+  }, [readerKey]);
+
+  // Session lifecycle: one open session per reader mount so a crash or a forced
+  // quit leaves an interrupted session the History page can resume.
+  const resumeSessionId = searchParams.get("session");
+  useEffect(() => {
+    if (fileMode) return;
+    let disposed = false;
+    const requested = resumeSessionId;
+    void (async () => {
+      if (requested) {
+        await api.resumeReadingSession(requested).catch(() => undefined);
+      }
+      const created = await api
+        .startReadingSession(issueId, pageRef.current)
+        .catch(() => null);
+      if (!created) return;
+      if (disposed) {
+        // StrictMode double-mounts effects in development; do not leave a
+        // freshly created session looking interrupted.
+        void api.closeReadingSession(created, 0, pageRef.current).catch(() => undefined);
+        return;
+      }
+      sessionRef.current = created;
+    })();
+    const heartbeat = window.setInterval(() => {
+      const id = sessionRef.current;
+      if (id) {
+        void api
+          .touchReadingSession(id, pagesVisited.current, pageRef.current)
+          .catch(() => undefined);
+      }
+    }, 30_000);
+    return () => {
+      disposed = true;
+      window.clearInterval(heartbeat);
+      const id = sessionRef.current;
+      sessionRef.current = null;
+      if (id) {
+        void api
+          .closeReadingSession(id, pagesVisited.current, pageRef.current)
+          .catch(() => undefined);
+      }
+    };
+  }, [fileMode, issueId, resumeSessionId]);
 
   const pages = query.data?.pages ?? [];
   const spreads =
@@ -96,14 +174,18 @@ export default function ReaderPage() {
   const spreadIndex = spreadForPage(spreads, page);
 
   const persist = useCallback(
-    (nextPage: number) => {
-      if (!issueId) return;
+    (nextPage: number, offset?: number) => {
+      if (!readerKey) return;
       if (persistTimer.current) window.clearTimeout(persistTimer.current);
       persistTimer.current = window.setTimeout(() => {
-        void api.saveProgress(issueId, nextPage, settings.completionThreshold);
+        if (fileMode) {
+          void api.saveFileProgress(fileParam, nextPage, offset);
+        } else {
+          void api.saveProgress(issueId, nextPage, offset, settings.completionThreshold);
+        }
       }, 400);
     },
-    [issueId, settings.completionThreshold],
+    [fileMode, fileParam, issueId, readerKey, settings.completionThreshold],
   );
 
   const goToPage = useCallback(
@@ -173,21 +255,16 @@ export default function ReaderPage() {
   const openIssue = useCallback(
     (target: string | null | undefined) => {
       if (!target) return;
-      void api.recordReadingSession(
-        issueId,
-        pagesVisited.current,
-        Math.round((Date.now() - sessionStart.current) / 1000),
-      );
       const suffix = activeOrder ? `?order=${activeOrder}` : "";
       navigate(`/reader/${target}${suffix}`);
     },
-    [activeOrder, issueId, navigate],
+    [activeOrder, navigate],
   );
 
   const nextInOrder = useQuery({
     queryKey: ["next-in-order", activeOrder, issueId],
     queryFn: () => api.nextInOrder(activeOrder ?? "", issueId),
-    enabled: Boolean(activeOrder),
+    enabled: Boolean(activeOrder) && !fileMode,
     staleTime: Infinity,
   });
 
@@ -204,8 +281,9 @@ export default function ReaderPage() {
   }, [activeOrder, nextInOrder.data, nextInOrder.isSuccess, openIssue, query.data, toast]);
 
   useEffect(() => {
-    void api.bookmarks(issueId).then(setBookmarks).catch(() => undefined);
-  }, [issueId]);
+    const load = fileMode ? api.fileBookmarks(fileParam) : api.bookmarks(issueId);
+    void load.then(setBookmarks).catch(() => undefined);
+  }, [fileMode, fileParam, issueId]);
 
   const toggleFullscreen = useCallback(async () => {
     try {
@@ -220,8 +298,10 @@ export default function ReaderPage() {
   }, [toast]);
 
   const addBookmark = useCallback(async () => {
-    const created = await api.addBookmark(
-      issueId,
+    const add = fileMode ? api.addFileBookmark : api.addBookmark;
+    const target = fileMode ? fileParam : issueId;
+    const created = await add(
+      target,
       page,
       bookmarkLabel || `Page ${page + 1}`,
       bookmarkNote.trim() || undefined,
@@ -233,7 +313,7 @@ export default function ReaderPage() {
     setBookmarkLabel("");
     setBookmarkNote("");
     toast.push(`Bookmarked page ${page + 1}`, "success");
-  }, [bookmarkLabel, bookmarkNote, issueId, page, toast]);
+  }, [bookmarkLabel, bookmarkNote, fileMode, fileParam, issueId, page, toast]);
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
@@ -302,16 +382,27 @@ export default function ReaderPage() {
     if (mode !== "vertical" && mode !== "horizontal") return;
     const container = scrollRef.current;
     if (!container) return;
-    const key = `${issueId}:${mode}`;
+    const key = `${readerKey}:${mode}`;
     if (scrolledKey.current === key) return;
     const vertical = mode === "vertical";
+    const resumeOffset = query.data?.progress.scrollOffset ?? 0;
     const align = () => {
       const target = container.querySelector<HTMLElement>(`[data-page="${page}"]`);
       if (!target) return;
       if (vertical) {
-        container.scrollTop = target.offsetTop;
+        container.scrollTop = scrollPositionFor(
+          target.offsetTop,
+          target.offsetHeight,
+          resumeOffset,
+          container.clientHeight,
+        );
       } else {
-        container.scrollLeft = target.offsetLeft;
+        container.scrollLeft = scrollPositionFor(
+          target.offsetLeft,
+          target.offsetWidth,
+          resumeOffset,
+          container.clientWidth,
+        );
       }
     };
     align();
@@ -325,7 +416,7 @@ export default function ReaderPage() {
       cancelAnimationFrame(raf);
       pending.forEach((image) => image.removeEventListener("load", onLoad));
     };
-  }, [issueId, mode, page]);
+  }, [mode, page, query.data, readerKey]);
 
   useEffect(() => {
     if ((mode !== "vertical" && mode !== "horizontal") || !scrollRef.current) return;
@@ -354,6 +445,12 @@ export default function ReaderPage() {
           setPage(closest);
           persist(closest);
         }
+        const active = children.find((child) => Number(child.dataset.page) === closest);
+        if (active) {
+          const start = vertical ? active.offsetTop : active.offsetLeft;
+          const size = vertical ? active.offsetHeight : active.offsetWidth;
+          persist(closest, offsetWithin(center, start, size));
+        }
       });
     };
     container.addEventListener("scroll", onScroll, { passive: true });
@@ -368,31 +465,26 @@ export default function ReaderPage() {
     if (!query.data || total === 0) return;
     const lastPage = page >= total - 1;
     if (!lastPage) return;
-    if (autoAdvanced.current === issueId) return;
-    if (!activeOrder) return;
+    if (autoAdvanced.current === readerKey) return;
+    if (!activeOrder || fileMode) return;
     if (query.data.progress.status !== "completed") return;
     if (!nextInOrder.data) return;
-    autoAdvanced.current = issueId;
+    autoAdvanced.current = readerKey;
     const timer = window.setTimeout(() => goNextIssue(), 900);
     return () => window.clearTimeout(timer);
-  }, [activeOrder, goNextIssue, issueId, nextInOrder.data, page, query.data, total]);
+  }, [activeOrder, fileMode, goNextIssue, nextInOrder.data, page, query.data, readerKey, total]);
 
   useEffect(() => {
     return () => {
       if (persistTimer.current) window.clearTimeout(persistTimer.current);
-      void api.saveProgress(
-        issueId,
-        page,
-        settings.completionThreshold,
-      );
-      void api.recordReadingSession(
-        issueId,
-        pagesVisited.current,
-        Math.round((Date.now() - sessionStart.current) / 1000),
-      );
+      if (fileMode) {
+        void api.saveFileProgress(fileParam, pageRef.current, undefined);
+      } else {
+        void api.saveProgress(issueId, pageRef.current, undefined, settings.completionThreshold);
+      }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [issueId]);
+  }, [fileMode, fileParam, issueId]);
 
   if (query.isLoading) {
     return (
@@ -418,10 +510,51 @@ export default function ReaderPage() {
 
   const data = query.data;
   const ratio = total ? (page + 1) / total : 0;
+  // Optional high-resolution re-request (CORE-3): once the page is zoomed past
+  // 1.5x, ask the backend for a width-scaled JPEG so detail is real, not a
+  // CSS-upscaled bitmap. Below that threshold the source page is enough.
+  const currentPage = data.pages[page];
+  // Quantise to 512px buckets so continuous wheel zoom does not fire a new
+  // image request on every step; the browser then caches each bucket.
+  const hiResWidth =
+    zoom.zoom.scale > 1.5 && currentPage?.width
+      ? Math.min(
+          8192,
+          Math.ceil(
+            (currentPage.width *
+              Math.min(zoom.zoom.scale, 4) *
+              Math.min(2, Math.max(1, window.devicePixelRatio || 1))) /
+              512,
+          ) * 512,
+        )
+      : undefined;
   const background = data.background || "#0b0c10";
+  const gamma = Math.min(2, Math.max(0.5, settings.gamma ?? 1));
+  const brightness = Math.min(1.4, Math.max(0.4, settings.brightness ?? 1));
 
   return (
-    <div className="relative flex h-full flex-col overflow-hidden" style={{ background }} data-reader>
+    <div
+      className="relative flex h-full flex-col overflow-hidden"
+      style={
+        {
+          background,
+          "--reader-brightness": brightness,
+          "--reader-gamma": 1 / gamma,
+        } as React.CSSProperties
+      }
+      data-reader
+    >
+      <svg aria-hidden className="pointer-events-none absolute size-0">
+        <defs>
+          <filter id="reader-gamma" colorInterpolationFilters="sRGB">
+            <feComponentTransfer>
+              <feFuncR type="gamma" amplitude="1" exponent="var(--reader-gamma)" offset="0" />
+              <feFuncG type="gamma" amplitude="1" exponent="var(--reader-gamma)" offset="0" />
+              <feFuncB type="gamma" amplitude="1" exponent="var(--reader-gamma)" offset="0" />
+            </feComponentTransfer>
+          </filter>
+        </defs>
+      </svg>
       <div
         className={cx(
           "absolute inset-x-0 top-0 z-30 flex items-center gap-3 border-b border-[var(--line)] bg-[color-mix(in_srgb,var(--panel)_88%,transparent)] px-4 py-2.5 backdrop-blur-md transition-transform duration-300",
@@ -479,7 +612,8 @@ export default function ReaderPage() {
             onClick={() => {
               const nextOffset = spreadOffset === 0 ? 1 : 0;
               setSpreadOffset(nextOffset);
-              void api.setSpreadOffset(issueId, nextOffset).catch(() => undefined);
+              const setOffset = fileMode ? api.setFileSpreadOffset : api.setSpreadOffset;
+              void setOffset(fileMode ? fileParam : issueId, nextOffset).catch(() => undefined);
             }}
             title="Shift spread pairing so the first page is paired"
             aria-label="Toggle spread offset"
@@ -492,13 +626,34 @@ export default function ReaderPage() {
           onClick={() => {
             const nextDirection = rtl ? "ltr" : "rtl";
             setReadingDirection(nextDirection);
-            void api.setDirectionOverride(issueId, nextDirection).catch(() => undefined);
+            const setDirection = fileMode
+              ? api.setFileDirectionOverride
+              : api.setDirectionOverride;
+            void setDirection(fileMode ? fileParam : issueId, nextDirection).catch(
+              () => undefined,
+            );
           }}
           aria-label="Toggle reading direction"
           title={`Reading direction for this file: ${rtl ? "right to left" : "left to right"}`}
         >
           <span className="text-[10px] font-semibold">{rtl ? "RTL" : "LTR"}</span>
         </button>
+        {(variantsQuery.data?.length ?? 0) > 1 && (
+          <button
+            className={cx("btn btn-ghost btn-sm", compareOpen && "text-[var(--accent)]")}
+            onClick={() => {
+              const other =
+                variantsQuery.data?.find((entry) => entry.id !== issueId)?.id ?? null;
+              if (!compareId) setCompareId(other);
+              setComparePage(page);
+              setCompareOpen((current) => !current);
+            }}
+            aria-label="Compare versions"
+            title="Compare alternate covers or editions side by side"
+          >
+            <Icon name="panel" className="size-4" />
+          </button>
+        )}
         <button className="btn btn-ghost btn-sm" onClick={() => setBookmarksOpen(true)} aria-label="Bookmarks">
           <Icon name="bookmark" className="size-4" />
         </button>
@@ -621,7 +776,7 @@ export default function ReaderPage() {
                 return (
                   <img
                     key={`${index}-${pageInfo.name}`}
-                    src={pageUrl(data.fileId, index)}
+                    src={pageUrl(data.fileId, index, hiResWidth)}
                     alt={`Page ${index + 1}`}
                     draggable={false}
                     className="reader-page max-h-full w-auto select-none rounded-sm shadow-2xl shadow-black/60"
@@ -707,6 +862,108 @@ export default function ReaderPage() {
         </div>
       </div>
 
+      {compareOpen && compareId && (
+        <div className="absolute inset-0 z-40 flex flex-col bg-[color-mix(in_srgb,var(--panel)_96%,transparent)] backdrop-blur-sm">
+          <header className="flex flex-wrap items-center gap-3 border-b border-[var(--line)] px-4 py-2.5">
+            <h2 className="font-display text-sm font-semibold">Compare versions</h2>
+            <span className="text-[11px] text-muted">
+              page {comparePage + 1} of {Math.max(total, compareQuery.data?.pages.length ?? 0)}
+            </span>
+            <div className="ml-auto flex items-center gap-2">
+              <select
+                className="input h-8 w-auto text-xs"
+                value={compareId}
+                onChange={(event) => {
+                  setCompareId(event.currentTarget.value);
+                  setComparePage(0);
+                }}
+                aria-label="Comparison version"
+              >
+                {(variantsQuery.data ?? []).map((entry) => (
+                  <option key={entry.id} value={entry.id}>
+                    {entry.edition ? `${entry.edition} · ` : ""}
+                    {entry.title}
+                  </option>
+                ))}
+              </select>
+              <button
+                className="btn btn-sm"
+                onClick={() => {
+                  const suffix = activeOrder ? `?order=${activeOrder}` : "";
+                  navigate(`/reader/${compareId}${suffix}`);
+                  setCompareOpen(false);
+                }}
+              >
+                Switch to this version
+              </button>
+              <button
+                className="btn btn-ghost btn-sm"
+                onClick={() => setCompareOpen(false)}
+                aria-label="Close comparison"
+              >
+                <Icon name="x" className="size-4" />
+              </button>
+            </div>
+          </header>
+          <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 overflow-hidden p-3 sm:grid-cols-2">
+            {[
+              { key: "current", fileId: data.fileId, title: data.title, edition: null as string | null },
+              {
+                key: "compare",
+                fileId: compareQuery.data?.fileId,
+                title: compareQuery.data?.title ?? "Version",
+                edition:
+                  variantsQuery.data?.find((entry) => entry.id === compareId)?.edition ?? null,
+              },
+            ].map((pane) => (
+              <div
+                key={pane.key}
+                className="flex min-h-0 flex-col overflow-hidden rounded-xl border border-[var(--line)] bg-[var(--surface-1)]"
+              >
+                <div className="flex items-center justify-between gap-2 border-b border-[var(--line)] px-3 py-1.5">
+                  <p className="truncate text-[11px] font-medium">{pane.title}</p>
+                  {pane.edition && <span className="chip chip-accent">{pane.edition}</span>}
+                </div>
+                <div className="flex min-h-0 flex-1 items-center justify-center p-2">
+                  {pane.fileId ? (
+                    <img
+                      src={pageUrl(pane.fileId, comparePage)}
+                      alt={`${pane.title} page ${comparePage + 1}`}
+                      className="max-h-full max-w-full object-contain"
+                      draggable={false}
+                    />
+                  ) : (
+                    <Spinner />
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+          <footer className="flex items-center justify-center gap-3 border-t border-[var(--line)] px-4 py-2">
+            <button
+              className="btn btn-sm"
+              onClick={() => setComparePage((current) => Math.max(0, current - 1))}
+              disabled={comparePage <= 0}
+            >
+              <Icon name="chevronLeft" className="size-4" /> Previous
+            </button>
+            <button
+              className="btn btn-sm"
+              onClick={() =>
+                setComparePage((current) =>
+                  Math.min(
+                    Math.max(total, compareQuery.data?.pages.length ?? 0) - 1,
+                    current + 1,
+                  ),
+                )
+              }
+            >
+              Next <Icon name="chevronRight" className="size-4" />
+            </button>
+          </footer>
+        </div>
+      )}
+
       {bookmarksOpen && (
         <div className="absolute inset-0 z-40 flex justify-end">
           <div className="absolute inset-0 bg-black/55" onClick={() => setBookmarksOpen(false)} />
@@ -770,7 +1027,9 @@ export default function ReaderPage() {
                       className="rounded p-1 text-muted opacity-0 hover:text-rose-300 group-hover:opacity-100"
                       aria-label="Delete bookmark"
                       onClick={async () => {
-                        await api.deleteBookmark(mark.id);
+                        await (fileMode
+                          ? api.deleteFileBookmark(mark.id)
+                          : api.deleteBookmark(mark.id));
                         setBookmarks((current) => current.filter((item) => item.id !== mark.id));
                       }}
                     >
@@ -788,7 +1047,9 @@ export default function ReaderPage() {
                       <button
                         className="btn btn-sm btn-primary"
                         onClick={async () => {
-                          const updated = await api.updateBookmarkNote(mark.id, noteDraft.trim() || null);
+                          const updated = await (fileMode
+                            ? api.updateFileBookmarkNote(mark.id, noteDraft.trim() || null)
+                            : api.updateBookmarkNote(mark.id, noteDraft.trim() || null));
                           setBookmarks((current) =>
                             current.map((item) =>
                               item.id === mark.id ? { ...item, note: updated.note } : item,

@@ -41,6 +41,7 @@ const PATHS: Record<string, string> = {
   eyeOff:
     "M17.9 17.9A10.4 10.4 0 0 1 12 19c-6 0-10-7-10-7a18 18 0 0 1 5.1-5.9M9.9 4.2A10.9 10.9 0 0 1 12 4c6 0 10 7 10 7a18 18 0 0 1-2.2 3.2M1 1l22 22",
   info: "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20Zm0-13v.01M12 11v6",
+  lock: "M6 10V7a6 6 0 0 1 12 0v3M5 10h14a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1Zm7 4v4",
 };
 
 export function Icon({ name, className }: IconProps) {

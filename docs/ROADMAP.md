@@ -1,8 +1,9 @@
 # Comic Reader — Development Roadmap
 
 > **Status:** CORE (Stage 1) partly implemented. Reading, library, series, collections,
-> orders, search, stats and spoiler filtering work offline; metadata providers, FTS5 search,
-> smart collections, unmatched-file matching and per-profile spoilers are not started. See
+> orders, search (FTS5 with filters), stats, spoiler filtering, smart collections and
+> unmatched-file matching work offline; metadata providers and per-profile spoilers are not
+> started. See
 > [`HANDOVER.md`](./HANDOVER.md) for the live remaining-work list.
 > **Companion documents:** [`ARCHITECTURE.md`](./ARCHITECTURE.md), [`DATA_MODEL.md`](./DATA_MODEL.md).
 > **Scope:** A local-first desktop comic reader and library for Tauri 2, React, TypeScript, Rust,
@@ -43,12 +44,12 @@ A stage is not "done" because its features exist. It is done when:
 
 | Item | State |
 | --- | --- |
-| Tauri 2 shell | Implemented; 55 IPC commands, `comic://` asset protocol |
+| Tauri 2 shell | Implemented; 68 IPC commands, `comic://` asset protocol |
 | React UI | Library, Series, Reader, Collections, Orders, Search, History, Stats, Settings |
 | Rust modules | `db`, `library`, `archive`, `pdf`, `metadata`, `repo`, `protocol`, `commands`, `models` |
-| Database | Schema v4 with versioned migrations and pre-migration backups |
+| Database | Schema v6 (FTS5 search index) with versioned migrations and pre-migration backups |
 | Archive support | CBZ, ZIP, CBR, image PDF, image folders |
-| Tests / lint | 22 Rust integration tests, 20 Vitest tests, clippy `-D warnings`, eslint. No CI pipeline yet. |
+| Tests / lint | 34 Rust integration tests, 34 Vitest tests, clippy `-D warnings`, eslint. No CI pipeline yet. |
 | Security config | Tightened CSP, scoped capability set |
 | Docs | `ARCHITECTURE.md`, `DATA_MODEL.md`, `HANDOVER.md`, this file |
 
@@ -90,6 +91,7 @@ Deliverables:
 - Add/remove library roots through a native folder picker; paths stay in Rust.
 - Recursive scan with progress, cancellation, and resume.
 - File records with format, size, page count, and status; unmatched files visible.
+  **Unmatched files have a dedicated view + file reader (schema v9).**
 - Manual rescan; missing/unreadable file states.
 - Root-aware paths: move a root, keep the library.
 - Background scanning that does not freeze the UI.
@@ -201,10 +203,14 @@ Deliverables:
 
 - Series list and detail views with issues ordered by number, with natural sort.
 - Manual issue reordering for specials/annuals that break numeric order.
-- Series metadata editing with metadata lock.
+- Series metadata editing with metadata lock. **Metadata lock implemented (schema v7);
+  franchise grouping is not (publisher/universe only).**
 - Publisher and franchise grouping.
 - Variant handling as designed in `DATA_MODEL.md` (decision Q2).
-- Unmatched files view with a "match to issue" flow.
+- Unmatched files view with a "match to issue" flow. **Implemented (schema v9): `/unmatched`
+  lists loose files (imported with "keep unmatched"), `/file/:id` reads them with file-scoped
+  progress/bookmarks, and matching reuses the file row so progress survives. Manual matching
+  only; provider-driven match proposals are still open.**
 
 **Criticism:** automatic series grouping from filenames will be wrong often. Ship manual grouping
 and correction before promising automation.
@@ -237,7 +243,8 @@ Deliverables:
 - Provider adapters behind one trait, user-enabled, offline-tolerant, rate-limited.
 - Match proposals with reasons; accept/reject; never silently overwrite user edits.
 - Provenance display ("this synopsis came from X on date Y").
-- Manual metadata editing with lock.
+- Manual metadata editing with lock. **Lock implemented (schema v7); editing, automatic
+  lock-on-save, lock-aware bulk edits and forced refresh exist. Providers are not built.**
 - Cache and snapshot provider responses; all fetched data remains available offline.
 
 **Criticisms:**
@@ -273,6 +280,8 @@ orders with optional generation from `story_start_date` as a draft. This is deci
 Deliverables:
 
 - FTS5 search over titles, creators, characters, arcs, events, publishers, and safe text.
+  **Implemented** for titles, series, numbers, creators, publishers, descriptions and bookmark
+  notes; character/arc/event text arrives with the universe schema.
 - Filters: publisher, series, year range, read status, format, collection, character, arc.
 - Sort options and keyset pagination.
 - Search result snippets generated **after** spoiler filtering.
@@ -303,6 +312,8 @@ Deliverables:
 - Add series, issues, arcs, characters, events, orders, and unmatched files.
 - Manual ordering and notes.
 - A fixed, typed smart-collection rule set compiled to SQL (no arbitrary expressions).
+  **Implemented (schema v8): 15 allowlisted fields × 10 operators, bound values, empty rules
+  match nothing, smart membership flows through detail/counts/search filters.**
 - Collection membership visible on entity detail pages.
 
 ### CORE-14 — Spoiler protection
@@ -487,7 +498,7 @@ These are not features and must not be deferred to the end:
 | CORE-1 | scanner idempotency, cancellation, missing files, case collisions |
 | CORE-2/3 | spread pairing, fit modes, zoom anchor math, memory bounds |
 | CORE-5 | preference resolution precedence |
-| CORE-6/7 | virtualisation, cover placeholders, natural sort |
+| CORE-6/7 | virtualisation, cover placeholders, natural sort, unmatched match keeps progress |
 | CORE-8 | progress reconciliation across rematching and multi-issue files |
 | CORE-9 | XML safety, filename parsing, match acceptance/rejection, offline fallback |
 | CORE-10 | reorder correctness, import/export round-trip, unresolved placeholders |

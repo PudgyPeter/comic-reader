@@ -18,6 +18,7 @@ export interface SeriesSummary {
   year: string | null;
   readingDirection: "ltr" | "rtl" | null;
   missingCount: number;
+  metadataLocked: boolean;
 }
 
 export interface MissingIssue {
@@ -57,6 +58,7 @@ export interface IssueCard {
   variantOf: string | null;
   edition: string | null;
   variantCount: number;
+  metadataLocked: boolean;
 }
 
 export interface LibraryTotals {
@@ -97,6 +99,99 @@ export interface ImportResult {
   warnings: ImportWarning[];
 }
 
+export interface ImportCandidate {
+  path: string;
+  relativePath: string;
+  format: string;
+  pageCount: number;
+  seriesTitle: string;
+  title: string;
+  number: string;
+  volume: string | null;
+  publisher: string | null;
+  releaseDate: string | null;
+  writer: string | null;
+  artist: string | null;
+  coverArtist: string | null;
+  description: string | null;
+  duplicate: boolean;
+  warning: string | null;
+}
+
+export interface ImportOverride {
+  relativePath: string;
+  seriesTitle?: string;
+  title?: string;
+  number?: string;
+  volume?: string;
+  publisher?: string;
+  releaseDate?: string;
+  writer?: string;
+  artist?: string;
+  coverArtist?: string;
+  description?: string;
+  keepUnmatched?: boolean;
+}
+
+export interface UnmatchedFile {
+  id: string;
+  rootId: string | null;
+  path: string;
+  relativePath: string;
+  format: string;
+  sizeBytes: number;
+  pageCount: number;
+  status: string;
+  addedAt: string;
+  page: number;
+  progressStatus: "unread" | "in-progress" | "completed";
+  lastReadAt: string | null;
+  suggestedSeries: string;
+  suggestedNumber: string;
+  suggestedTitle: string;
+}
+
+export interface FileProposal {
+  fileId: string;
+  filePath: string;
+  format: string;
+  pageCount: number;
+  seriesTitle: string;
+  title: string;
+  number: string;
+  volume: string | null;
+  publisher: string | null;
+  releaseDate: string | null;
+  writer: string | null;
+  artist: string | null;
+  coverArtist: string | null;
+  description: string | null;
+}
+
+export interface MatchFilePatch {
+  seriesTitle?: string;
+  seriesId?: string;
+  title?: string;
+  number?: string;
+  volume?: string;
+  publisher?: string;
+  releaseDate?: string;
+  writer?: string;
+  artist?: string;
+  coverArtist?: string;
+  description?: string;
+}
+
+export interface FileProgressState {
+  page: number;
+  total: number;
+  status: "unread" | "in-progress" | "completed";
+  startedAt: string | null;
+  completedAt: string | null;
+  updatedAt: string | null;
+  scrollOffset: number;
+}
+
 export interface PageInfo {
   index: number;
   name: string;
@@ -111,6 +206,7 @@ export interface ProgressState {
   startedAt: string | null;
   completedAt: string | null;
   updatedAt: string | null;
+  scrollOffset: number;
 }
 
 export interface ReaderPayload {
@@ -164,6 +260,63 @@ export interface NextIssue {
   fileId: string | null;
 }
 
+export type SmartRuleField =
+  | "title"
+  | "number"
+  | "series"
+  | "publisher"
+  | "universe"
+  | "writer"
+  | "artist"
+  | "coverArtist"
+  | "edition"
+  | "releaseDate"
+  | "year"
+  | "status"
+  | "format"
+  | "pages"
+  | "lastPage";
+
+export type SmartRuleOp =
+  | "contains"
+  | "eq"
+  | "ne"
+  | "startsWith"
+  | "gt"
+  | "gte"
+  | "lt"
+  | "lte"
+  | "isSet"
+  | "isEmpty";
+
+export interface SmartRule {
+  field: SmartRuleField;
+  op: SmartRuleOp;
+  value: string;
+}
+
+export interface SmartRules {
+  all: SmartRule[];
+  any: SmartRule[];
+}
+
+export type CollectionSortMode =
+  | "manual"
+  | "title"
+  | "series"
+  | "added_desc"
+  | "added_asc"
+  | "release_date";
+
+export interface CollectionPatch {
+  name?: string;
+  description?: string;
+  coverFileId?: string;
+  isSmart?: boolean;
+  smartRules?: SmartRules;
+  sortMode?: CollectionSortMode;
+}
+
 export interface Collection {
   id: string;
   name: string;
@@ -171,6 +324,9 @@ export interface Collection {
   coverFileId: string | null;
   itemCount: number;
   createdAt: string;
+  isSmart: boolean;
+  smartRules: SmartRules | null;
+  sortMode: CollectionSortMode;
 }
 
 export interface CollectionDetail extends Collection {
@@ -181,6 +337,28 @@ export interface SearchResult {
   issues: IssueCard[];
   series: SeriesSummary[];
   total: number;
+  snippets: Record<string, string>;
+  nextCursor: string | null;
+}
+
+export interface SearchFilter {
+  query: string;
+  publisher?: string | null;
+  seriesId?: string | null;
+  universe?: string | null;
+  status?: string | null;
+  format?: string | null;
+  yearFrom?: number | null;
+  yearTo?: number | null;
+  collectionId?: string | null;
+  sort?: string;
+  cursor?: string | null;
+  limit?: number;
+}
+
+export interface RecentSearch {
+  query: string;
+  searchedAt: string;
 }
 
 export interface SearchSuggestion {
@@ -198,6 +376,8 @@ export interface SavedSearch {
 export interface Settings {
   background: string;
   pageSpacing: number;
+  brightness: number;
+  gamma: number;
   readingDirection: "ltr" | "rtl";
   defaultMode: ReaderMode;
   defaultFit: FitMode;
@@ -228,10 +408,14 @@ export interface HistorySession {
   startedAt: string;
   endedAt: string;
   pages: number;
+  lastPage: number;
+  status: string;
+  resumedAt: string | null;
 }
 
 export interface HistoryPayload {
   sessions: HistorySession[];
+  interrupted: HistorySession[];
   recent: IssueCard[];
 }
 
@@ -279,6 +463,7 @@ export interface IssuePatch {
   seriesTitle?: string;
   variantOf?: string | null;
   edition?: string | null;
+  metadataLocked?: boolean;
 }
 
 export interface SeriesPatch {
@@ -289,4 +474,5 @@ export interface SeriesPatch {
   volume?: string;
   coverFileId?: string;
   readingDirection?: "ltr" | "rtl" | "";
+  metadataLocked?: boolean;
 }

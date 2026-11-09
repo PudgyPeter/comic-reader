@@ -23,6 +23,7 @@ export default function SeriesDetailPage() {
     description: string;
     readingDirection: "" | "ltr" | "rtl";
     coverFileId: string;
+    metadataLocked: boolean;
   } | null>(null);
   const [pickingCover, setPickingCover] = useState(false);
 
@@ -61,6 +62,7 @@ export default function SeriesDetailPage() {
     description: series.description ?? "",
     readingDirection: (series.readingDirection ?? "") as "" | "ltr" | "rtl",
     coverFileId: series.coverFileId ?? "",
+    metadataLocked: series.metadataLocked ?? false,
   };
   const setForm = (value: typeof form) => setDraft(value);
   const next = series.issues.find((issue) => issue.status !== "completed") ?? series.issues[0];
@@ -95,6 +97,12 @@ export default function SeriesDetailPage() {
       description: form.description,
       readingDirection: form.readingDirection,
       coverFileId: form.coverFileId || undefined,
+      // Only send the lock when it differs so saving other changes keeps the
+      // backend's automatic lock-on-edit behaviour.
+      metadataLocked:
+        draft && draft.metadataLocked !== (series.metadataLocked ?? false)
+          ? draft.metadataLocked
+          : undefined,
     });
     await query.refetch();
     setDraft(null);
@@ -148,6 +156,11 @@ export default function SeriesDetailPage() {
             <button className="btn" onClick={() => setEditing((current) => !current)}>
               <Icon name="edit" className="size-3.5" /> Edit series
             </button>
+            {series.metadataLocked && (
+              <span className="chip" title="Series metadata is locked against rescans">
+                <Icon name="lock" className="size-3" /> Locked
+              </span>
+            )}
             <AddToCollectionMenu seriesId={seriesId} label="Add series to collection" />
             <div className="flex overflow-hidden rounded-lg border border-[var(--line)]">
               <button
@@ -287,6 +300,23 @@ export default function SeriesDetailPage() {
                 onChange={(event) => setForm({ ...form, description: event.currentTarget.value })}
               />
             </label>
+            <label className="flex items-start gap-2 sm:col-span-3">
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                checked={form.metadataLocked}
+                onChange={(event) =>
+                  setForm({ ...form, metadataLocked: event.currentTarget.checked })
+                }
+              />
+              <span>
+                <span className="text-[11px] font-medium">Protect manual edits (metadata lock)</span>
+                <span className="mt-0.5 block text-[10px] text-muted">
+                  Locked series metadata is never overwritten by rescans or metadata refreshes.
+                  Saving any edit locks it automatically.
+                </span>
+              </span>
+            </label>
           </div>
           <div className="mt-3 flex justify-end gap-2">
             <button className="btn btn-sm" onClick={() => setEditing(false)}>
@@ -351,7 +381,12 @@ export default function SeriesDetailPage() {
                 <div key={issue.id}>
                   <IssueRow issue={issue} />
                   {variants.map((variant) => (
-                    <IssueRow key={variant.id} issue={variant} variant />
+                    <IssueRow
+                      key={variant.id}
+                      issue={variant}
+                      variant
+                      compareWith={issue.id}
+                    />
                   ))}
                 </div>
               );
@@ -362,10 +397,17 @@ export default function SeriesDetailPage() {
   );
 }
 
-function IssueRow({ issue, variant = false }: { issue: SeriesDetailIssue; variant?: boolean }) {
+function IssueRow({
+  issue,
+  variant = false,
+  compareWith,
+}: {
+  issue: SeriesDetailIssue;
+  variant?: boolean;
+  compareWith?: string;
+}) {
   return (
-    <Link
-      to={`/reader/${issue.id}`}
+    <div
       className={cx(
         "flex items-center gap-3 border-b border-[var(--line)] px-3 py-2.5 text-sm last:border-0 hover:bg-[var(--surface-2)]",
         variant && "bg-[var(--surface-1)] pl-10",
@@ -389,12 +431,33 @@ function IssueRow({ issue, variant = false }: { issue: SeriesDetailIssue; varian
             .join(" · ") || "No metadata"}
         </p>
       </div>
+      {issue.metadataLocked && (
+        <span className="text-muted" title="Metadata locked — manual edits are protected">
+          <Icon name="lock" className="size-3" />
+        </span>
+      )}
       {issue.edition && <span className="chip chip-accent hidden sm:inline-flex">{issue.edition}</span>}
       <div className="hidden w-28 shrink-0 items-center gap-2 sm:flex">
         <ProgressBar value={progressRatio(issue)} />
       </div>
       <StatusBadge status={issue.status} />
-      <Icon name="chevronRight" className={cx("size-4 shrink-0 text-muted")} />
-    </Link>
+      {compareWith && (
+        <Link
+          to={`/reader/${compareWith}?compare=${issue.id}`}
+          className="btn btn-ghost btn-sm"
+          title="Compare this variant with the base issue side by side"
+          aria-label={`Compare ${issue.title} with the base issue`}
+        >
+          <Icon name="panel" className="size-3.5" />
+        </Link>
+      )}
+      <Link
+        to={`/reader/${issue.id}`}
+        className="grid size-7 place-items-center rounded text-muted hover:text-[var(--text-strong)]"
+        aria-label={`Read ${issue.title}`}
+      >
+        <Icon name="chevronRight" className="size-4 shrink-0" />
+      </Link>
+    </div>
   );
 }

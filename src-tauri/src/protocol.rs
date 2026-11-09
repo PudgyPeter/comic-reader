@@ -43,10 +43,31 @@ pub fn handle(ctx: UriSchemeContext<'_, Wry>, request: tauri::http::Request<Vec<
                 Err(err) => error_response(StatusCode::NOT_FOUND, &err.to_string()),
             }
         }
-        ["page", file_id, page] => {
+        ["page", file_id, page] | ["page", file_id, page, _] => {
             let page = page.parse::<i64>().unwrap_or(0);
-            match state.db.with(|conn| repo::page_bytes(conn, file_id, page)) {
-                Ok((bytes, mime)) => image_response(bytes, &mime, true),
+            let width = segments
+                .get(3)
+                .and_then(|value| value.parse::<u32>().ok());
+            let Some(width) = width else {
+                return match state.db.with(|conn| repo::page_bytes(conn, file_id, page)) {
+                    Ok((bytes, mime)) => image_response(bytes, &mime, true),
+                    Err(err) => error_response(StatusCode::NOT_FOUND, &err.to_string()),
+                };
+            };
+            let cache_key = format!("{file_id}-{page}-w{width}.jpg");
+            let cache_path = cache_dir.join("zoom").join(&cache_key);
+            if let Ok(bytes) = std::fs::read(&cache_path) {
+                return image_response(bytes, "image/jpeg", true);
+            }
+            match state
+                .db
+                .with(|conn| repo::page_bytes_scaled(conn, file_id, page, width))
+            {
+                Ok((bytes, mime)) => {
+                    let _ = std::fs::create_dir_all(cache_dir.join("zoom"));
+                    let _ = std::fs::write(&cache_path, &bytes);
+                    image_response(bytes, &mime, true)
+                }
                 Err(err) => error_response(StatusCode::NOT_FOUND, &err.to_string()),
             }
         }

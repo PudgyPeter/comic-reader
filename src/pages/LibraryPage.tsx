@@ -692,9 +692,16 @@ function BulkEditor({
               }
               setBusy(true);
               try {
-                await api.bulkUpdateIssues(issueIds, cleaned);
+                const updated = await api.bulkUpdateIssues(issueIds, cleaned);
+                const skipped = issueIds.length - updated.length;
                 setPatch({});
                 onSaved();
+                toast.push(
+                  skipped > 0
+                    ? `Updated ${updated.length} · skipped ${skipped} locked`
+                    : `Updated ${updated.length} issue${updated.length === 1 ? "" : "s"}`,
+                  skipped > 0 ? "info" : "success",
+                );
               } catch (error) {
                 toast.push(String(error), "error");
               } finally {
@@ -708,7 +715,8 @@ function BulkEditor({
       }
     >
       <p className="mb-3 text-[11px] text-muted">
-        Empty fields are left untouched. Filled fields are written to every selected issue.
+        Empty fields are left untouched. Filled fields are written to every selected issue;
+        issues with a metadata lock are skipped. Edited issues become locked automatically.
       </p>
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         {field("publisher", "Publisher")}
