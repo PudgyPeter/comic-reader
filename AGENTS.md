@@ -30,6 +30,19 @@
 - Schema changes bump `SCHEMA_VERSION` in `db.rs` and add a new `MIGRATION_N` block; never edit
   a shipped migration (existing user databases have already run it).
 
+## Roadmap bookkeeping (mandatory)
+
+`docs/ROADMAP.md` is the single source of truth for what is built. Before you finish any turn
+that implements, partially implements, exposes, or deletes behaviour tracked there, run the
+`roadmap-status` skill (`.kilo/skill/roadmap-status/SKILL.md`) and update the roadmap:
+
+- flip the deliverable marker (`[x]`, `[~]` with a bold missing-note, or `[ ]`);
+- fix every paired location the change invalidates (header tally, §2, §7, §8, §9, §12);
+- only use `[x]` when a test or a recorded manual check exists; otherwise `[~]` and say so.
+
+Docs-only or trivial edits with no deliverable behind them are exempt. `/roadmap-status` runs
+the pass on demand.
+
 ## Working style (streaming reliability)
 
 Long turns get truncated by the client ("response ended unexpectedly"). Keep every turn small:
