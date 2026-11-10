@@ -478,6 +478,8 @@ pub struct Proposed {
     pub artist: Option<String>,
     pub cover_artist: Option<String>,
     pub description: Option<String>,
+    /// Names from the `<Characters>` tag; drives the series roster.
+    pub characters: Vec<String>,
 }
 
 pub fn propose_metadata(path: &Path, fallback_name: &str) -> Proposed {
@@ -531,6 +533,10 @@ pub fn propose_metadata(path: &Path, fallback_name: &str) -> Proposed {
         artist: comic_info.as_ref().and_then(|info| info.artist.clone()),
         cover_artist: comic_info.as_ref().and_then(|info| info.cover_artist.clone()),
         description: comic_info.as_ref().and_then(|info| info.description.clone()),
+        characters: comic_info
+            .as_ref()
+            .map(|info| info.characters.clone())
+            .unwrap_or_default(),
     }
 }
 
@@ -643,6 +649,7 @@ fn import_file(
         artist,
         cover_artist,
         description,
+        characters,
     } = proposed;
 
     let (series_id, series_created) = ensure_series(&tx, &series_title, publisher.as_deref())?;
@@ -667,13 +674,14 @@ fn import_file(
         });
     }
 
+    let issue_id = new_id();
     tx.execute(
         "INSERT INTO issues
             (id, file_id, series_id, title, number, sort_number, volume, publisher, universe,
              release_date, writer, artist, cover_artist, description, created_at, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, ?9, ?10, ?11, ?12, ?13, ?14, ?14)",
         params![
-            new_id(),
+            issue_id,
             file_id,
             series_id,
             title,
@@ -694,6 +702,7 @@ fn import_file(
          SELECT id, 0, coalesce(page_count, ?1), 'unread', ?2 FROM issues WHERE file_id = ?3",
         params![pages.len() as i64, timestamp, file_id],
     )?;
+    crate::characters::record_issue_characters(&tx, &series_id, &issue_id, &characters)?;
     tx.commit()?;
 
     if let Some(cover) = pages.first() {

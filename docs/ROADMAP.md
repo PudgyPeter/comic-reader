@@ -53,12 +53,12 @@ Deliverables are marked inline so this file stays the single source of truth:
 
 | Item | State |
 | --- | --- |
-| Tauri 2 shell | Implemented; 88 IPC commands, `comic://` asset protocol |
+| Tauri 2 shell | Implemented; 95 IPC commands, `comic://` asset protocol |
 | React UI | Library, Series, Reader, Unmatched, Collections, Orders, Search, History, Stats, Settings |
-| Rust modules | `db`, `library`, `archive`, `pdf`, `metadata`, `toc` (OCR), `repo`, `protocol`, `commands`, `models` |
-| Database | Schema v10 (FTS5, metadata lock, smart collections, file-scoped progress, multi-issue files) with versioned migrations and pre-migration backups |
+| Rust modules | `db`, `library`, `archive`, `pdf`, `metadata`, `toc` (OCR), `characters`, `web` (Wikipedia lookup), `repo`, `protocol`, `commands`, `models` |
+| Database | Schema v11 (FTS5, metadata lock, smart collections, file-scoped progress, multi-issue files, series-scoped character roster) with versioned migrations and pre-migration backups |
 | Archive support | CBZ, ZIP, CBR, image PDF, image folders; single-file roots and multi-issue (split) files |
-| Tests / lint | 44 Rust integration tests (+1 OCR test behind `--ignored`), 34 Vitest tests, clippy `-D warnings`, eslint. No CI pipeline, no Prettier/rustfmt config. |
+| Tests / lint | 49 Rust integration tests (+2 behind `--ignored`: OCR split, live web lookup), 34 Vitest tests, clippy `-D warnings`, eslint. No CI pipeline, no Prettier/rustfmt config. |
 | Security config | Tightened CSP, scoped capability set |
 | Docs | `ARCHITECTURE.md`, `DATA_MODEL.md`, `HANDOVER.md`, this file |
 
@@ -458,14 +458,32 @@ and licensing questions. Expect manual correction to be necessary.
 **Recommendation:** start with detection into an editable, per-page panel table; do not ship
 detection as authoritative. Store results so failures are visible and fixable.
 
-### LATER-3 — Character profiles  — `[ ] not started`
+### LATER-3 — Character profiles  — `[~] series roster done, profiles partial`
 
 Character pages with descriptions, aliases, first appearance, portraits, and a list of
 appearances.
 
-**Depends on:** `characters`, `character_aliases`, `character_appearances`. **None of these
-tables exist yet** — the schema stops at v10 with no character/arc/timeline/location tables, so
-this is an additive migration plus UI, not UI on existing schema.
+- [x] Series-scoped roster from `ComicInfo.xml` `<Characters>` (schema v11): `characters`,
+  `character_aliases`, `character_appearances`; import records them inside the import
+  transaction and `/series/:id` can rebuild the roster (`characters::sync_series`, idempotent,
+  covered by `import_records_characters_from_comic_info` and
+  `character_sync_is_idempotent_and_keeps_descriptions`).
+- [x] Descriptions with explicit provenance (`comic` / `web` / `manual`). The local composer
+  states series, first appearance and known-appearance count from library data only; a web
+  summary (Wikipedia, `web.rs`) is fetched only on an explicit click and saved with its URL.
+  Covered by `import_records_characters_from_comic_info` (comic source) and
+  `web_lookup_returns_a_bounded_summary` (behind `--ignored`).
+- [~] Appearance lists are spoiler-filtered through the shared `repo::apply_spoilers`
+  (`character_appearances_are_spoiler_filtered`, which hides the title of an issue past the
+  frontier). **Only the title is hidden** — the issue number and count stay visible by design.
+- [ ] Portrait images, alias editing UI, and `is_death`/`is_first_appearance`/`appearance_type`
+  flags. **Not built** — the v11 tables carry only name, description, aliases and issue links.
+- [ ] Cross-series identity. Characters are unique per `(series_id, name)`, so the same
+  character in two runs is two rows. **No universe-wide merge exists**; a merge UI is the
+  prerequisite for relationships, timelines and arc tracking.
+
+**Depends on:** the v11 tables, which now exist. The remaining work is additive (portraits,
+alias UI, appearance types, cross-series merge), not a schema rewrite.
 **Hard parts:** identity (same character across reboots/universes), data volume, spoiler-safe
 appearance lists, and sourcing. Do not expect a complete character database from providers.
 
@@ -562,7 +580,7 @@ Phase 6   CORE-11 search + CORE-12 shortcuts               done (scopes + some f
 Phase 7   CORE-13 collections + CORE-10 reading orders     done (sections/import-export missing)
 Phase 8   CORE-14 spoiler protection across all surfaces   partial (global only, not every surface)
 Phase 9   Hardening                                        not started (a11y, diagnostics, packaging CI)
-Phase 10  LATER features                                   not started
+Phase 10  LATER features                                   started: series character roster only
 ```
 
 Remaining CORE work, in dependency order: provider adapters + match proposals (CORE-9),
@@ -589,11 +607,11 @@ These are not features and must not be deferred to the end:
 
 | Area | Requirement | State |
 | --- | --- | --- |
-| Offline | Every screen works with the network disabled; test this in CI or manually each phase | `[x]` Fonts bundled locally, no runtime network calls |
+| Offline | Every screen works with the network disabled; test this in CI or manually each phase | `[x]` Fonts bundled locally; the only runtime request is the user-initiated character summary lookup in `web.rs` (8 s timeout, 256 KiB cap, no caller waits on it) |
 | Performance | Budgets for cold start, library scroll, reader open, and memory; measure, do not guess | `[~]` Import scans metadata only (`archive::scan_*`), so memory is flat by construction, but **no measurement is recorded** in `HANDOVER.md`; no automated budgets |
 | Accessibility | Keyboard-first, focus rings, screen reader labels, reduced motion, sufficient contrast | `[~]` Keyboard + reduced motion done; sparse labels, no dialog focus trap |
 | Error UX | Missing file, corrupt archive, DB busy, permission denied each have a designed state | `[~]` Reader/import have states; DB-busy and permission-denied are generic errors |
-| Migrations | Every schema change has a migration, a backup step, and a test from the previous version | `[x]` v1→v10 with backup-before-migrate and a v4→current test |
+| Migrations | Every schema change has a migration, a backup step, and a test from the previous version | `[x]` v1→v11 with backup-before-migrate and a v4→current test |
 | Security | New inputs (archives, XML, provider HTML) get limits and tests before release | `[~]` Entry size caps, safe XML, CSP; no fuzzing of the new OCR/archive paths |
 | Diagnostics | Logs and a support bundle that do not leak paths or keys | `[ ]` Not started |
 | Packaging | Installers and code signing for each target; test on a clean machine | `[~]` Windows NSIS + portable exe built; unsigned, not smoke-tested on Windows |
@@ -615,7 +633,7 @@ These are not features and must not be deferred to the end:
 | CORE-11 | spoiler-filtered search, pagination stability | `[x]` covered |
 | CORE-13 | smart rule compilation (no injection), orphan cleanup | `[~]` injection covered; orphan cleanup N/A (FKs) |
 | CORE-14 | every surface that can leak a spoiler | `[~]` tests cover `library_snapshot`, `issue`, `order_detail` and `search_filtered`; **`series_detail`, `collection_detail`, `reading_history` and `issue_variants` call `apply_spoilers` but have no leak test** |
-| LATER | each feature needs its own accuracy and performance criteria before starting | `[ ]` nothing started |
+| LATER | each feature needs its own accuracy and performance criteria before starting | `[~]` LATER-3 started: roster from `<Characters>` is tested (`import_records_characters_from_comic_info`, idempotency, spoiler filtering); portraits, alias UI, appearance types and cross-series merge are untested because they do not exist |
 
 ---
 

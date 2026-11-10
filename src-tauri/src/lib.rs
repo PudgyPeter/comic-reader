@@ -1,4 +1,5 @@
 pub mod archive;
+pub mod characters;
 pub mod commands;
 pub mod db;
 pub mod error;
@@ -9,6 +10,7 @@ pub mod pdf;
 pub mod protocol;
 pub mod toc;
 pub mod repo;
+pub mod web;
 
 use std::sync::Arc;
 
@@ -144,6 +146,13 @@ pub fn run() {
             commands::recombine_split,
             commands::apply_split,
             commands::split_available,
+            commands::series_characters,
+            commands::all_characters,
+            commands::sync_series_characters,
+            commands::character_detail,
+            commands::update_character,
+            commands::delete_character,
+            commands::lookup_character,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

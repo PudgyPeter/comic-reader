@@ -1155,3 +1155,99 @@ pub async fn apply_split(
     .await
     .map_err(|err| AppError::message(err.to_string()))?
 }
+
+// ---------------------------------------------------------------------------
+// Characters
+//
+// The roster is derived from `ComicInfo.xml`; the web lookup is the only
+// opt-in network path and is triggered by an explicit user click.
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn series_characters(
+    state: State<'_, AppState>,
+    series_id: String,
+) -> AppResult<Vec<CharacterCard>> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        db.with(|conn| crate::characters::series_characters(conn, &series_id))
+    })
+    .await
+    .map_err(|err| AppError::message(err.to_string()))?
+}
+
+#[tauri::command]
+pub async fn sync_series_characters(
+    state: State<'_, AppState>,
+    series_id: String,
+) -> AppResult<crate::characters::CharacterSync> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        db.with(|conn| {
+            let report = crate::characters::sync_series(conn, &series_id)?;
+            let ids = crate::characters::series_characters(conn, &series_id)?;
+            for card in ids {
+                crate::characters::ensure_local_description(conn, &card.id)?;
+            }
+            Ok(report)
+        })
+    })
+    .await
+    .map_err(|err| AppError::message(err.to_string()))?
+}
+
+#[tauri::command]
+pub async fn all_characters(state: State<'_, AppState>) -> AppResult<Vec<CharacterCard>> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        db.with(|conn| crate::characters::all_characters(conn))
+    })
+    .await
+    .map_err(|err| AppError::message(err.to_string()))?
+}
+
+#[tauri::command]
+pub async fn character_detail(
+    state: State<'_, AppState>,
+    character_id: String,
+) -> AppResult<CharacterDetail> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        db.with(|conn| crate::characters::character_detail(conn, &character_id))
+    })
+    .await
+    .map_err(|err| AppError::message(err.to_string()))?
+}
+
+#[tauri::command]
+pub async fn update_character(
+    state: State<'_, AppState>,
+    character_id: String,
+    patch: CharacterPatch,
+) -> AppResult<CharacterCard> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        db.with(|conn| crate::characters::update_character(conn, &character_id, &patch))
+    })
+    .await
+    .map_err(|err| AppError::message(err.to_string()))?
+}
+
+#[tauri::command]
+pub async fn delete_character(state: State<'_, AppState>, character_id: String) -> AppResult<()> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        db.with(|conn| crate::characters::delete_character(conn, &character_id))
+    })
+    .await
+    .map_err(|err| AppError::message(err.to_string()))?
+}
+
+/// Looks up a public summary. Never cached automatically: the user decides
+/// whether to keep it, so a stale or wrong extract costs nothing.
+#[tauri::command]
+pub async fn lookup_character(name: String) -> AppResult<CharacterSummary> {
+    tauri::async_runtime::spawn_blocking(move || crate::web::lookup_character(&name))
+        .await
+        .map_err(|err| AppError::message(err.to_string()))?
+}

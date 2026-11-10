@@ -340,6 +340,22 @@ function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value));
 }
 
+// The exported fixture has no character rows, so synthesise a small roster from
+// the mock series. This keeps the roster screens non-empty in the dev harness
+// without implying the real importer invents characters.
+const mockCharacters: Json[] = (store.series as Json[]).slice(0, 6).map((series, index) => ({
+  id: `mock-character-${index}`,
+  seriesId: series.id,
+  seriesTitle: series.title,
+  name: ["Sonic the Hedgehog", "Miles \"Tails\" Prower", "Knuckles the Echidna", "Amy Rose", "Dr. Eggman", "Shadow the Hedgehog"][index] ?? `Character ${index + 1}`,
+  description: index % 2 === 0 ? null : "Mock roster entry used to render the character screens.",
+  descriptionSource: index % 2 === 0 ? "comic" : "manual",
+  sourceUrl: null,
+  appearanceCount: (index + 1) * 3,
+  readCount: index,
+  descriptionUpdatedAt: null,
+}));
+
 const handlers: Record<string, (args: Json) => unknown> = {
   library: (args) => snapshot(args.filter),
   library_roots: () => store.roots,
@@ -367,6 +383,35 @@ const handlers: Record<string, (args: Json) => unknown> = {
     };
   },
   series_detail: (args) => seriesDetail(args.seriesId),
+  series_characters: (args) =>
+    mockCharacters.filter((entry) => entry.seriesId === args.seriesId),
+  all_characters: () => mockCharacters,
+  sync_series_characters: () => ({
+    seriesId: "",
+    characters: mockCharacters.length,
+    appearances: mockCharacters.reduce((sum, c) => sum + c.appearanceCount, 0),
+    issuesScanned: 0,
+    issuesWithoutMetadata: 0,
+  }),
+  character_detail: (args) => {
+    const card = mockCharacters.find((entry) => entry.id === args.characterId);
+    if (!card) throw new Error("Character not found");
+    return { ...card, appearances: [] };
+  },
+  update_character: (args) => {
+    const card = mockCharacters.find((entry) => entry.id === args.characterId);
+    if (!card) throw new Error("Character not found");
+    card.description = args.patch?.description ?? card.description;
+    card.descriptionSource = args.patch?.descriptionSource ?? "manual";
+    return card;
+  },
+  delete_character: () => null,
+  lookup_character: () => ({
+    title: "Example",
+    extract: "Mock summaries are not fetched from the web.",
+    url: "https://example.invalid",
+    source: "Mock",
+  }),
   issue_detail: (args) => decorate(findIssue(args.issueId) as Json),
   reader_payload: (args) => readerPayload(args.issueId),
   set_spread_offset: (args) => {

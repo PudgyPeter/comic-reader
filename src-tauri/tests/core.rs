@@ -1709,7 +1709,7 @@ fn migration_from_v4_preserves_progress_and_adds_session_columns() {
             .map_err(Into::into)
         })
         .unwrap();
-    assert_eq!(version, "10");
+    assert_eq!(version, "11");
 
     // Existing progress survives, with the new column defaulted.
     let reader = db.with(|conn| repo::reader_payload(conn, &issue.id)).unwrap();
@@ -2726,4 +2726,258 @@ fn propose_split_reads_a_real_contents_page() {
     // of producing a bogus split.
     let result = db.with(|conn| repo::propose_split(conn, &file_id, Some(&models)));
     assert!(result.is_err());
+}
+
+fn write_cbz_with_characters(path: &Path, characters: &str, number: &str) {
+    let file = std::fs::File::create(path).unwrap();
+    let mut zip = zip::ZipWriter::new(file);
+    let options: zip::write::FileOptions<()> =
+        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    for index in 0..3 {
+        let mut image = image::RgbImage::new(800, 1200);
+        for pixel in image.pixels_mut() {
+            *pixel = image::Rgb([(index * 17) as u8, 40, 90]);
+        }
+        let mut buffer = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(image)
+            .write_to(&mut buffer, image::ImageFormat::Png)
+            .unwrap();
+        zip.start_file(format!("page-{:03}.png", index + 1), options)
+            .unwrap();
+        zip.write_all(&buffer.into_inner()).unwrap();
+    }
+    let xml = format!(
+        r#"<?xml version="1.0" encoding="utf-8"?>
+<ComicInfo>
+  <Series>Archie Sonic</Series>
+  <Number>{number}</Number>
+  <Title>Roster test</Title>
+  <Characters>{characters}</Characters>
+</ComicInfo>"#
+    );
+    zip.start_file("ComicInfo.xml", options).unwrap();
+    zip.write_all(xml.as_bytes()).unwrap();
+    zip.finish().unwrap();
+}
+
+fn series_id_for(db: &Database, title: &str) -> String {
+    db.with(|conn| {
+        let id = conn.query_row(
+            "SELECT id FROM series WHERE title = ?1",
+            [title],
+            |row| row.get::<_, String>(0),
+        )?;
+        Ok(id)
+    })
+    .unwrap()
+}
+
+#[test]
+fn import_records_characters_from_comic_info() {
+    let (dir, db) = setup("characters-import");
+    let library_dir = dir.join("library");
+    std::fs::create_dir_all(&library_dir).unwrap();
+    write_cbz_with_characters(
+        &library_dir.join("Sonic 001.cbz"),
+        "Sonic the Hedgehog, Miles \"Tails\" Prower; Knuckles",
+        "1",
+    );
+    write_cbz_with_characters(
+        &library_dir.join("Sonic 002.cbz"),
+        "Sonic the Hedgehog &amp; Amy Rose",
+        "2",
+    );
+    db.with(|conn| library::import_root(conn, &library_dir)).unwrap();
+    let series_id = series_id_for(&db, "Archie Sonic");
+
+    let characters = db
+        .with(|conn| comic_reader_lib::characters::series_characters(conn, &series_id))
+        .unwrap();
+    let names = characters.iter().map(|c| c.name.as_str()).collect::<Vec<_>>();
+    assert!(names.contains(&"Sonic the Hedgehog"));
+    assert!(names.contains(&"Knuckles"));
+    assert!(names.contains(&"Amy Rose"));
+
+    let sonic = characters
+        .iter()
+        .find(|c| c.name == "Sonic the Hedgehog")
+        .unwrap();
+    assert_eq!(sonic.appearance_count, 2);
+    assert_eq!(sonic.read_count, 0);
+
+    // The composed description is factual and cites the library itself.
+    db.with(|conn| {
+        comic_reader_lib::characters::ensure_local_description(conn, &sonic.id)
+    })
+    .unwrap();
+    let detail = db
+        .with(|conn| comic_reader_lib::characters::character_detail(conn, &sonic.id))
+        .unwrap();
+    assert_eq!(detail.card.description_source, "comic");
+    let text = detail.card.description.unwrap_or_default();
+    assert!(text.contains("Archie Sonic"), "{text}");
+    assert!(text.contains("2 known appearances"), "{text}");
+    assert_eq!(detail.appearances.len(), 2);
+}
+
+#[test]
+fn character_sync_is_idempotent_and_keeps_descriptions() {
+    let (dir, db) = setup("characters-sync");
+    let library_dir = dir.join("library");
+    std::fs::create_dir_all(&library_dir).unwrap();
+    write_cbz_with_characters(&library_dir.join("Sonic 001.cbz"), "Sonic, Tails", "1");
+    db.with(|conn| library::import_root(conn, &library_dir)).unwrap();
+    let series_id = series_id_for(&db, "Archie Sonic");
+
+    let first = db
+        .with(|conn| comic_reader_lib::characters::sync_series(conn, &series_id))
+        .unwrap();
+    let second = db
+        .with(|conn| comic_reader_lib::characters::sync_series(conn, &series_id))
+        .unwrap();
+    assert_eq!(first.characters, 2);
+    assert_eq!(first.appearances, 2);
+    assert_eq!(second.characters, 2);
+    assert_eq!(second.appearances, 2);
+
+    let characters = db
+        .with(|conn| comic_reader_lib::characters::series_characters(conn, &series_id))
+        .unwrap();
+    let sonic = characters.iter().find(|c| c.name == "Sonic").unwrap();
+    db.with(|conn| {
+        comic_reader_lib::characters::update_character(
+            conn,
+            &sonic.id,
+            &comic_reader_lib::models::CharacterPatch {
+                description: Some("Fast blue hedgehog.".into()),
+                description_source: Some("manual".into()),
+                ..Default::default()
+            },
+        )
+    })
+    .unwrap();
+    db.with(|conn| comic_reader_lib::characters::sync_series(conn, &series_id))
+        .unwrap();
+    let refreshed = db
+        .with(|conn| comic_reader_lib::characters::character_detail(conn, &sonic.id))
+        .unwrap();
+    assert_eq!(
+        refreshed.card.description.as_deref(),
+        Some("Fast blue hedgehog.")
+    );
+    assert_eq!(refreshed.card.description_source, "manual");
+}
+
+#[test]
+fn character_appearances_are_spoiler_filtered() {
+    let (dir, db) = setup("characters-spoiler");
+    let library_dir = dir.join("library");
+    std::fs::create_dir_all(&library_dir).unwrap();
+    write_cbz_with_characters(&library_dir.join("Sonic 001.cbz"), "Sonic", "1");
+    write_cbz_with_characters(&library_dir.join("Sonic 002.cbz"), "Sonic", "2");
+    db.with(|conn| library::import_root(conn, &library_dir)).unwrap();
+    let series_id = series_id_for(&db, "Archie Sonic");
+    db.with(|conn| comic_reader_lib::characters::sync_series(conn, &series_id))
+        .unwrap();
+    let characters = db
+        .with(|conn| comic_reader_lib::characters::series_characters(conn, &series_id))
+        .unwrap();
+    let sonic = characters.iter().find(|c| c.name == "Sonic").unwrap();
+
+    // Finish issue #1; issue #2 is beyond the frontier and must not reveal its
+    // title in the appearance list.
+    let issues = db
+        .with(|conn| {
+            repo::library_snapshot(
+                conn,
+                &LibraryFilter {
+                    search: String::new(),
+                    universe: None,
+                    publisher: None,
+                    series_id: Some(series_id.clone()),
+                    status: None,
+                    sort: "number".into(),
+                    descending: false,
+                },
+            )
+        })
+        .unwrap()
+        .issues;
+    let first = issues.iter().find(|i| i.number == "1").unwrap();
+    db.with(|conn| repo::set_status(conn, &first.id, "completed"))
+        .unwrap();
+
+    let detail = db
+        .with(|conn| comic_reader_lib::characters::character_detail(conn, &sonic.id))
+        .unwrap();
+    assert_eq!(detail.appearances.len(), 2);
+    assert!(detail.appearances.iter().any(|a| a.spoiler_protected));
+    let hidden = detail
+        .appearances
+        .iter()
+        .find(|a| a.spoiler_protected)
+        .unwrap();
+    assert!(hidden.title.is_empty());
+}
+
+#[test]
+fn character_name_parsing_handles_tag_noise() {
+    use comic_reader_lib::metadata as meta;
+
+    let names = meta::parse_character_list("Sonic, Tails; Knuckles & Amy / Shadow\nRouge");
+    assert_eq!(
+        names,
+        vec!["Sonic", "Tails", "Knuckles", "Amy", "Shadow", "Rouge"]
+    );
+    // De-duplicates case-insensitively.
+    let names = meta::parse_character_list("Sonic, sonic, SONIC");
+    assert_eq!(names, vec!["Sonic"]);
+    // "X and Y" is split correctly.
+    let names = meta::parse_character_list("Tails, Knuckles and Amy");
+    assert_eq!(names, vec!["Tails", "Knuckles", "Amy"]);
+    // Role qualifiers are dropped.
+    assert_eq!(meta::clean_character_name("Sonic (protagonist)"), "Sonic");
+    assert_eq!(meta::clean_character_name("  Dr. Eggman  "), "Dr. Eggman");
+    assert_eq!(meta::character_sort_name("The Doctor"), "doctor");
+}
+
+#[test]
+fn migration_from_v4_test_knows_about_v11_tables() {
+    // Guards the v4→current path: MIGRATION_11 creates characters from scratch,
+    // so the previous test's drop-list has to stay in step with the schema.
+    let (dir, db) = setup("migrate-v11");
+    drop(db);
+    let db = Database::open(&dir.join("db")).unwrap();
+    let tables: Vec<String> = db
+        .with(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT name FROM sqlite_master WHERE type = 'table'
+                 AND name IN ('characters', 'character_aliases', 'character_appearances')",
+            )?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            Ok(rows.collect::<Result<Vec<_>, rusqlite::Error>>()?)
+        })
+        .unwrap();
+    assert_eq!(tables.len(), 3);
+    let version: String = db
+        .with(|conn| {
+            conn.query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+        })
+        .unwrap();
+    assert_eq!(version, "11");
+}
+
+#[test]
+#[ignore = "hits the public Wikipedia API; run with --ignored when the network is available"]
+fn web_lookup_returns_a_bounded_summary() {
+    let summary = comic_reader_lib::web::lookup_character("Sonic the Hedgehog").unwrap();
+    assert!(!summary.extract.is_empty());
+    assert_eq!(summary.source, "Wikipedia");
+    assert!(summary.url.starts_with("https://"));
+    assert!(summary.extract.chars().count() <= 1201);
 }

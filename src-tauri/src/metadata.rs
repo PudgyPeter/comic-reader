@@ -17,6 +17,8 @@ pub struct ComicInfo {
     pub artist: Option<String>,
     pub cover_artist: Option<String>,
     pub description: Option<String>,
+    /// Comma-separated `<Characters>` entries, cleaned and de-duplicated.
+    pub characters: Vec<String>,
 }
 
 const MAX_XML_BYTES: u64 = 4 * 1024 * 1024;
@@ -104,6 +106,13 @@ fn assign(info: &mut ComicInfo, field: &str, value: String) {
         }
         "coverartist" => info.cover_artist = Some(value),
         "summary" | "description" => info.description = Some(value),
+        "characters" | "character" => {
+            for name in parse_character_list(&value) {
+                if !info.characters.iter().any(|known| known.eq_ignore_ascii_case(&name)) {
+                    info.characters.push(name);
+                }
+            }
+        }
         _ => {}
     }
 }
@@ -254,4 +263,70 @@ pub fn parse_number(value: &str) -> f64 {
     } else {
         base + (suffix.chars().next().unwrap() as u32 as f64) / 1000.0
     }
+}
+
+/// Splits a ComicInfo `<Characters>` value into individual names.
+///
+/// The tag is free text in the wild: comma, semicolon, slash and "&" are all
+/// used as separators, and some editors pack a whole roster into one value.
+/// Parenthesised qualifiers ("Sonic (Classic)") are kept because they often
+/// distinguish genuinely different characters.
+pub fn parse_character_list(raw: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let normalized = raw.replace(" and ", "&");
+    for part in normalized.split([',', ';', '/', '&', '\n']) {
+        let name = clean_character_name(part);
+        if name.is_empty() {
+            continue;
+        }
+        if !out.iter().any(|known| known.eq_ignore_ascii_case(&name)) {
+            out.push(name);
+        }
+    }
+    out
+}
+
+/// Normalises OCR/comic-info noise out of a single character name.
+pub fn clean_character_name(raw: &str) -> String {
+    let trimmed = raw
+        .trim()
+        .trim_matches(|c: char| c == '*' || c == '-' || c == '·' || c == ':');
+    let mut cleaned = trimmed.split_whitespace().collect::<Vec<_>>().join(" ");
+    // A trailing "and" survives splitting on commas in "Tails, Knuckles and Amy".
+    if let Some(stripped) = cleaned.strip_suffix(" and") {
+        cleaned = stripped.trim_end().to_string();
+    }
+    if let Some(stripped) = cleaned.strip_prefix("and ") {
+        cleaned = stripped.trim_start().to_string();
+    }
+    // Drop role qualifiers that some taggers append: "Sonic (protagonist)".
+    if cleaned.ends_with(')')
+        && let Some((head, _)) = cleaned.rsplit_once('(')
+        && !head.trim().is_empty()
+        && cleaned.split('(').count() == 2
+    {
+        cleaned = head.trim_end().to_string();
+    }
+    if cleaned.chars().count() > 80 {
+        return String::new();
+    }
+    cleaned
+}
+
+/// Lowercased sort key: strips leading articles and non-alphanumerics.
+pub fn character_sort_name(name: &str) -> String {
+    let lower = name.to_lowercase();
+    let stripped = ["the ", "a ", "an "]
+        .iter()
+        .find_map(|prefix| lower.strip_prefix(prefix))
+        .unwrap_or(&lower);
+    let mut out = String::new();
+    for ch in stripped.chars() {
+        if ch.is_alphanumeric() {
+            out.push(ch);
+        } else if ch == ' ' || ch == '-' {
+            out.push(' ');
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
 }

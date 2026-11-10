@@ -5,7 +5,7 @@ is the spec; this file is only state.
 
 ## Verified green
 
-- `cd src-tauri && cargo test` -> 44 passed, 1 ignored (`tests/core.rs`)
+- `cd src-tauri && cargo test` -> 49 passed, 2 ignored (`tests/core.rs`: OCR split, live web lookup)
 - Test library generator: `cargo run --example sonic_fixture -- <library-dir> <db-dir>`
   writes 26 synthetic CBZ issues (gaps at 7/12/15, one annual, one Cover B variant,
   a companion run with one gap), imports them, and seeds progress, a bookmark,
@@ -20,12 +20,13 @@ is the spec; this file is only state.
 
 ## Implemented
 
-Backend (`src-tauri/src`): `db` (schema **v10**, migrations, backup), `library` (CBZ/ZIP/CBR/
+Backend (`src-tauri/src`): `db` (schema **v11**, migrations, backup), `library` (CBZ/ZIP/CBR/
 PDF/image-folder import, duplicates, rescan, cancellable + progress-reporting scans), `archive`,
 `pdf` (pure-Rust image-page extractor), `metadata`, `repo` (queries, progress, orders,
 collections, search incl. bookmark notes, stats, history, missing-issue detection, per-series/
-per-file reading direction, variants), `protocol` (`comic://`), `commands` (71 registered IPC),
-`models`.
+per-file reading direction, variants), `protocol` (`comic://`), `commands` (95 registered IPC),
+`characters` (series roster from `<Characters>`, descriptions with provenance), `web` (the only
+outbound client: Wikipedia summary lookup, opt-in per click), `models`.
 
 Frontend (`src`): Library, Unmatched files (list + match-to-issue, reader for loose files),
 Series + detail (reading direction, cover picker, missing-issue
@@ -280,8 +281,20 @@ Verified: `cargo test` 34 passed, `npm test` 34 passed, `npm run typecheck`, `np
 7. **Continuous-mode scroll offset — done.** Stored as a page fraction, so it is
    resolution-independent.
 
-Deferred by design (Stage 2/3): panel detection, characters/relationships/locations/arcs/
-timeline, appearance tracking, sync, recommendations, full comparison view.
+8. **Character roster — done for one series at a time (schema v11).** `ComicInfo.xml`
+   `<Characters>` is parsed at import and re-derivable per series ("Rebuild roster" on the
+   series page); `characters`, `character_aliases` and `character_appearances` back it, with
+   `description_source` (`comic`/`web`/`manual`) and `source_url` so the UI can say where a
+   sentence came from. Descriptions are composed locally from the library first; the
+   "Look up on the web" button is the only network call in the app (Wikipedia REST,
+   `web.rs`: 8 s timeout, 256 KiB cap, user-initiated, nothing blocks on it). Appearance lists
+   run through `repo::apply_spoilers`; only the title is hidden past the frontier.
+   Next: portraits, alias editing UI, `appearance_type`/`is_death` flags, and a cross-series
+   merge (characters are unique per `(series_id, name)` today, so one character in two runs is
+   two rows — that merge is the prerequisite for relationships and arc tracking).
+
+Deferred by design (Stage 2/3): panel detection, relationships/locations/arcs/timeline,
+appearance tracking, sync, recommendations, full comparison view.
 
 ## How to verify UI without a working webview
 

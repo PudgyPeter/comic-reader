@@ -654,3 +654,62 @@ pub struct HistoryPayload {
     pub interrupted: Vec<HistorySession>,
     pub recent: Vec<IssueCard>,
 }
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CharacterCard {
+    pub id: String,
+    pub series_id: Option<String>,
+    pub series_title: Option<String>,
+    pub name: String,
+    pub description: Option<String>,
+    /// `comic` (derived from the library), `web` (fetched summary), `manual`.
+    pub description_source: String,
+    pub source_url: Option<String>,
+    pub appearance_count: i64,
+    pub read_count: i64,
+    pub description_updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CharacterAppearance {
+    pub issue_id: String,
+    pub title: String,
+    pub number: String,
+    pub series_id: Option<String>,
+    pub sort_number: f64,
+    pub release_date: Option<String>,
+    pub status: String,
+    /// True when the issue is beyond the reading frontier; `title` is empty.
+    pub spoiler_protected: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CharacterDetail {
+    #[serde(flatten)]
+    pub card: CharacterCard,
+    pub appearances: Vec<CharacterAppearance>,
+}
+
+/// User edit of a character. `None` fields are left untouched.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CharacterPatch {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub description_source: Option<String>,
+    pub source_url: Option<String>,
+    pub aliases: Option<Vec<String>>,
+}
+
+/// A summary fetched from the web, before the user chooses to keep it.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CharacterSummary {
+    pub title: String,
+    pub extract: String,
+    pub url: String,
+    pub source: String,
+}

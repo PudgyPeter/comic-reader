@@ -506,3 +506,56 @@ export interface SeriesPatch {
   readingDirection?: "ltr" | "rtl" | "";
   metadataLocked?: boolean;
 }
+
+export type CharacterDescriptionSource = "comic" | "web" | "manual";
+
+export interface CharacterCard {
+  id: string;
+  seriesId: string | null;
+  seriesTitle: string | null;
+  name: string;
+  description: string | null;
+  descriptionSource: CharacterDescriptionSource;
+  sourceUrl: string | null;
+  appearanceCount: number;
+  readCount: number;
+  descriptionUpdatedAt: string | null;
+}
+
+export interface CharacterAppearance {
+  issueId: string;
+  title: string;
+  number: string;
+  seriesId: string | null;
+  sortNumber: number;
+  releaseDate: string | null;
+  status: "unread" | "in-progress" | "completed";
+  spoilerProtected: boolean;
+}
+
+export interface CharacterDetail extends CharacterCard {
+  appearances: CharacterAppearance[];
+}
+
+export interface CharacterPatch {
+  name?: string;
+  description?: string;
+  descriptionSource?: CharacterDescriptionSource;
+  sourceUrl?: string | null;
+  aliases?: string[];
+}
+
+export interface CharacterSummary {
+  title: string;
+  extract: string;
+  url: string;
+  source: string;
+}
+
+export interface CharacterSync {
+  seriesId: string;
+  characters: number;
+  appearances: number;
+  issuesScanned: number;
+  issuesWithoutMetadata: number;
+}

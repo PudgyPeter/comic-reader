@@ -6,6 +6,7 @@ import { Cover, EmptyState, ProgressBar, Spinner, StatusBadge } from "../compone
 import { Icon } from "../components/Icon";
 import { cx, formatDate, pluralize, progressRatio } from "../lib/utils";
 import { AddToCollectionMenu } from "../components/AddToCollection";
+import { CharactersPanel } from "../components/Characters";
 import { useToast } from "../components/Toast";
 import type { IssueCard as SeriesDetailIssue } from "../lib/types";
 
@@ -30,6 +31,12 @@ export default function SeriesDetailPage() {
   const query = useQuery({
     queryKey: ["series", seriesId],
     queryFn: () => api.seriesDetail(seriesId),
+    enabled: Boolean(seriesId),
+  });
+
+  const characters = useQuery({
+    queryKey: ["characters", seriesId],
+    queryFn: () => api.seriesCharacters(seriesId),
     enabled: Boolean(seriesId),
   });
 
@@ -361,6 +368,12 @@ export default function SeriesDetailPage() {
           </div>
         </section>
       )}
+
+      <CharactersPanel
+        seriesId={seriesId}
+        characters={characters.data ?? []}
+        loading={characters.isLoading}
+      />
 
       <h2 className="mt-8 mb-3 font-display text-sm font-semibold tracking-tight text-[var(--text)]">
         Issues

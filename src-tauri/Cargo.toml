@@ -38,6 +38,7 @@ flate2 = "1.1.11"
 ocrs = { version = "0.14", default-features = false, features = ["onnx"] }
 rten = { version = "0.28", features = ["onnx_format"] }
 rten-imageproc = "0.28"
+ureq = { version = "3.4.0", default-features = false, features = ["rustls", "gzip"] }
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

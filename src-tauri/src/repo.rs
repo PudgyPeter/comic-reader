@@ -171,7 +171,7 @@ fn series_frontiers(conn: &Connection) -> AppResult<HashMap<String, f64>> {
     Ok(rows.collect::<Result<HashMap<_, _>, _>>()?)
 }
 
-fn apply_spoilers(
+pub(crate) fn apply_spoilers(
     conn: &Connection,
     settings: &Settings,
     issues: &mut [IssueCard],

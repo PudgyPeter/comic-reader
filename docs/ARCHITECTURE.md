@@ -20,7 +20,7 @@ extend yet; we are choosing one.
 | State / data fetching | None beyond `useState` |
 | Database | No SQLite, ORM, migration, or connection crates |
 | Archives / images | No `zip`, `rar`, `image`, or image-processing crates |
-| Networking | No HTTP client; only the opener plugin |
+| Networking | One outbound client: `ureq` in `web.rs` for the user-initiated character summary lookup (Wikipedia allowlist, 8 s timeout, 256 KiB cap). Nothing else uses the network. |
 | File access | No dialog or filesystem plugin |
 | Window | One window, `800x600`, no minimum size |
 | Security | `csp: null`; capability grants only `core:default` and `opener:default` |

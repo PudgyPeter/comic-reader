@@ -17,6 +17,11 @@ import type {
   MatchFilePatch,
   SplitProposal,
   SplitRange,
+  CharacterCard,
+  CharacterDetail,
+  CharacterPatch,
+  CharacterSummary,
+  CharacterSync,
   TocEntry,
   LibraryRoot,
   LibrarySnapshot,
@@ -202,6 +207,17 @@ export const api = {
     command<number>("set_file_spread_offset", { fileId, offset }),
   setFileDirectionOverride: (fileId: string, direction: "ltr" | "rtl" | null) =>
     command<"ltr" | "rtl" | null>("set_file_direction_override", { fileId, direction }),
+  seriesCharacters: (seriesId: string) =>
+    command<CharacterCard[]>("series_characters", { seriesId }),
+  allCharacters: () => command<CharacterCard[]>("all_characters"),
+  syncSeriesCharacters: (seriesId: string) =>
+    command<CharacterSync>("sync_series_characters", { seriesId }),
+  characterDetail: (characterId: string) =>
+    command<CharacterDetail>("character_detail", { characterId }),
+  updateCharacter: (characterId: string, patch: CharacterPatch) =>
+    command<CharacterCard>("update_character", { characterId, patch }),
+  deleteCharacter: (characterId: string) => command<void>("delete_character", { characterId }),
+  lookupCharacter: (name: string) => command<CharacterSummary>("lookup_character", { name }),
   splitAvailable: () => command<boolean>("split_available"),
   proposeSplit: (fileId: string) => command<SplitProposal>("propose_split", { fileId }),
   recombineSplit: (fileId: string, entries: TocEntry[], offset: number) =>

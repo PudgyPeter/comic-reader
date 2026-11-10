@@ -5,7 +5,7 @@ use rusqlite::Connection;
 
 use crate::error::{AppError, AppResult};
 
-pub const SCHEMA_VERSION: i64 = 10;
+pub const SCHEMA_VERSION: i64 = 11;
 
 pub struct Database {
     conn: Mutex<Connection>,
@@ -82,6 +82,9 @@ impl Database {
             }
             if version < 10 {
                 conn.execute_batch(MIGRATION_10)?;
+            }
+            if version < 11 {
+                conn.execute_batch(MIGRATION_11)?;
             }
             if version < SCHEMA_VERSION {
                 conn.execute(
@@ -553,6 +556,61 @@ CREATE TRIGGER IF NOT EXISTS bookmark_fts_au AFTER UPDATE OF label, note ON book
 END;
 
 PRAGMA foreign_keys = ON;
+"#;
+
+// Characters and appearances (schema v11).
+//
+// The design documents place character profiles in LATER, but a minimal,
+// *series-scoped* version is useful immediately: a ComicInfo.xml `<Characters>`
+// tag already lists who appears in each issue, so the app can build a roster
+// for a series without any provider, OCR or panel detection involved.
+//
+// Characters are scoped to one series (`series_id IS NULL` is reserved for a
+// future cross-series universe database). Descriptions carry their own source
+// and URL so a locally composed summary and a web-derived summary can coexist
+// without pretending the web text came from the comics.
+const MIGRATION_11: &str = r#"
+CREATE TABLE IF NOT EXISTS characters (
+    id TEXT PRIMARY KEY,
+    series_id TEXT REFERENCES series(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    sort_name TEXT NOT NULL,
+    description TEXT,
+    description_source TEXT NOT NULL DEFAULT 'comic'
+        CHECK (description_source IN ('comic', 'web', 'manual')),
+    source_url TEXT,
+    description_updated_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (series_id, name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_characters_series ON characters(series_id, sort_name);
+
+CREATE TABLE IF NOT EXISTS character_aliases (
+    id TEXT PRIMARY KEY,
+    character_id TEXT NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+    alias TEXT NOT NULL,
+    alias_type TEXT NOT NULL DEFAULT 'alias'
+        CHECK (alias_type IN ('alias', 'secret_identity', 'codename', 'title', 'misspelling')),
+    UNIQUE (character_id, alias)
+);
+
+CREATE INDEX IF NOT EXISTS idx_character_aliases_alias ON character_aliases(alias);
+
+CREATE TABLE IF NOT EXISTS character_appearances (
+    id TEXT PRIMARY KEY,
+    character_id TEXT NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+    issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+    source TEXT NOT NULL DEFAULT 'comicinfo'
+        CHECK (source IN ('comicinfo', 'manual')),
+    note TEXT,
+    created_at TEXT NOT NULL,
+    UNIQUE (character_id, issue_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_appearances_issue ON character_appearances(issue_id);
+CREATE INDEX IF NOT EXISTS idx_appearances_char ON character_appearances(character_id, issue_id);
 "#;
 
 pub fn now() -> String {

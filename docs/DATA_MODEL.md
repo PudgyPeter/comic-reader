@@ -899,6 +899,14 @@ user expressions.
 Character data is mostly a LATER face, but the minimal tables must exist now if arcs and spoiler
 protection reference characters.
 
+> **Implemented as of schema v11** — a deliberately narrower shape than the design below:
+> `characters` is scoped by `series_id` (unique per `(series_id, name)`) and carries
+> `description_source` (`comic`/`web`/`manual`) plus `source_url`; `character_appearances` links
+> character to issue with a `source` (`comicinfo`/`manual`). There is no `assets`/portrait
+> column, no `appearance_type`, and no `is_death`/`is_return`/`is_first_appearance` yet.
+> `character_relationships` is still unimplemented. Cross-series identity is unresolved: the
+> same character in two series is two rows.
+
 ### 10.1 Characters
 
 ```sql
