@@ -1,10 +1,11 @@
 # Comic Reader — Development Roadmap
 
-> **Status:** CORE (Stage 1) partly implemented. Reading, library, series, collections,
-> orders, search (FTS5 with filters), stats, spoiler filtering, smart collections and
-> unmatched-file matching work offline; metadata providers and per-profile spoilers are not
-> started. See
-> [`HANDOVER.md`](./HANDOVER.md) for the live remaining-work list.
+> **Status:** CORE (Stage 1) largely implemented — 51 of 95 deliverables done, 32 partial,
+> 12 not started (foundations F1–F10 plus CORE-1…CORE-14). Reading, library, series,
+> collections, orders, search (FTS5 with filters), stats, smart collections, unmatched-file
+> matching and omnibus splitting work offline. Metadata providers, per-profile spoilers, order
+> import/export/sections and root relocation are not started. Every deliverable is marked
+> inline; see [`HANDOVER.md`](./HANDOVER.md) for the live remaining-work list.
 > **Companion documents:** [`ARCHITECTURE.md`](./ARCHITECTURE.md), [`DATA_MODEL.md`](./DATA_MODEL.md).
 > **Scope:** A local-first desktop comic reader and library for Tauri 2, React, TypeScript, Rust,
 > and SQLite.
@@ -40,21 +41,30 @@ A stage is not "done" because its features exist. It is done when:
 
 ---
 
+### Status markers
+
+Deliverables are marked inline so this file stays the single source of truth:
+
+- `[x]` done and covered by a test or a manual check recorded in `HANDOVER.md`
+- `[~]` partially done; the marker text says what is missing
+- `[ ]` not started
+
 ## 2. Current state
 
 | Item | State |
 | --- | --- |
-| Tauri 2 shell | Implemented; 68 IPC commands, `comic://` asset protocol |
-| React UI | Library, Series, Reader, Collections, Orders, Search, History, Stats, Settings |
-| Rust modules | `db`, `library`, `archive`, `pdf`, `metadata`, `repo`, `protocol`, `commands`, `models` |
-| Database | Schema v6 (FTS5 search index) with versioned migrations and pre-migration backups |
-| Archive support | CBZ, ZIP, CBR, image PDF, image folders |
-| Tests / lint | 34 Rust integration tests, 34 Vitest tests, clippy `-D warnings`, eslint. No CI pipeline yet. |
+| Tauri 2 shell | Implemented; 88 IPC commands, `comic://` asset protocol |
+| React UI | Library, Series, Reader, Unmatched, Collections, Orders, Search, History, Stats, Settings |
+| Rust modules | `db`, `library`, `archive`, `pdf`, `metadata`, `toc` (OCR), `repo`, `protocol`, `commands`, `models` |
+| Database | Schema v10 (FTS5, metadata lock, smart collections, file-scoped progress, multi-issue files) with versioned migrations and pre-migration backups |
+| Archive support | CBZ, ZIP, CBR, image PDF, image folders; single-file roots and multi-issue (split) files |
+| Tests / lint | 44 Rust integration tests (+1 OCR test behind `--ignored`), 34 Vitest tests, clippy `-D warnings`, eslint. No CI pipeline, no Prettier/rustfmt config. |
 | Security config | Tightened CSP, scoped capability set |
 | Docs | `ARCHITECTURE.md`, `DATA_MODEL.md`, `HANDOVER.md`, this file |
 
-The task tables below were written before implementation; treat the state table above as
-authoritative and use [`HANDOVER.md`](./HANDOVER.md) for the live remaining-work list.
+The task tables below were written before implementation and are now annotated with
+per-deliverable status. Where a note and the marker disagree, the marker and its bold note are
+authoritative. Use [`HANDOVER.md`](./HANDOVER.md) for the live remaining-work list.
 
 ---
 
@@ -64,16 +74,16 @@ These are prerequisites, not features in the product sense.
 
 | ID | Task | Why it is first |
 | --- | --- | --- |
-| F1 | Rust module skeleton, `AppError`, `spawn_blocking` conventions | Every command depends on one error and concurrency model |
-| F2 | SQLite connection, pragmas, migration runner, backup-before-migrate | Data loss is unrecoverable without it |
-| F3 | IPC DTO conventions and a generated-bindings spike (`specta` vs `ts-rs`) | Prevents silent contract drift from day one |
-| F4 | `comic://` custom protocol with a stub handler | Page delivery is architectural; retrofitting it is painful |
-| F5 | Frontend app shell: router, providers, error boundaries, feature folders | Giant components appear without this from the start |
-| F6 | Query cache + typed `invoke` wrapper + error mapping | Sets the data-fetching pattern before any screen exists |
-| F7 | Test harness: Vitest + Testing Library, Rust integration tests, synthetic CBZ fixtures | Untested archive and migration code is a liability |
-| F8 | Lint/format/CI: ESLint, Prettier, `rustfmt`, `clippy -D warnings` | Cheap now, expensive later |
-| F9 | Restrictive CSP and minimal capabilities; remove unused `opener` grant | The template's security posture is not shippable |
-| F10 | Logging, diagnostics bundle, crash-safe startup recovery | Required to debug a desktop app you cannot inspect remotely |
+| F1 | [x] Rust module skeleton, `AppError`, `spawn_blocking` conventions | Every command depends on one error and concurrency model |
+| F2 | [x] SQLite connection, pragmas, migration runner, backup-before-migrate | Data loss is unrecoverable without it |
+| F3 | [~] IPC DTO conventions exist (handwritten `src/lib/types.ts` + `api.ts`); no generated bindings (`specta`/`ts-rs`) | Prevents silent contract drift from day one |
+| F4 | [x] `comic://` custom protocol | Page delivery is architectural; retrofitting it is painful |
+| F5 | [x] Frontend app shell: router, providers, error boundaries, feature folders | Giant components appear without this from the start |
+| F6 | [x] Query cache + typed `invoke` wrapper + error mapping | Sets the data-fetching pattern before any screen exists |
+| F7 | [x] Test harness: Vitest, Rust integration tests, synthetic CBZ fixtures. **`@testing-library/react` is installed but no test renders a component** — all 34 Vitest tests are pure logic (`spreads`, `scroll`, `shortcuts`, `reorder`, `utils`). | Untested archive and migration code is a liability |
+| F8 | [~] ESLint + `clippy -D warnings` are enforced; **no** Prettier, no `rustfmt.toml`, no CI workflow | Cheap now, expensive later |
+| F9 | [x] Restrictive CSP and minimal capabilities; remove unused `opener` grant | The template's security posture is not shippable |
+| F10 | [~] Pre-migration DB backups only; no logging plugin, no diagnostics bundle, no crash-recovery report | Required to debug a desktop app you cannot inspect remotely |
 
 **Sequencing note:** F1–F4 are backend-first; F5–F6 are frontend-first; F7–F10 are continuous.
 Do not build a reader screen before F2/F4 exist, or you will rewrite it.
@@ -88,18 +98,26 @@ Do not build a reader screen before F2/F4 exist, or you will rewrite it.
 
 Deliverables:
 
-- Add/remove library roots through a native folder picker; paths stay in Rust.
-  **A root may be a single large archive file too (multi-GB omnibus CBZ/CBR/PDF), and one file
-  can back several issues after an OCR-driven split.**
-- Recursive scan with progress, cancellation, and resume.
-- File records with format, size, page count, and status; unmatched files visible.
-  **Unmatched files have a dedicated view + file reader (schema v9).**
-- Manual rescan; missing/unreadable file states.
-- Root-aware paths: move a root, keep the library.
-- Background scanning that does not freeze the UI.
-- CBZ/ZIP and image-folder support (folder support may trail CBZ by one increment).
+- [x] Add/remove library roots through a native folder picker; paths stay in Rust.
+  A root may also be a single large archive file (multi-GB omnibus CBZ/CBR/PDF), and one file
+  can back several issues after an OCR-driven split.
+- [~] Recursive scan with progress and cancellation. **Bounded**: `WalkDir` stops at
+  `max_depth(6)` (silently — deeper files are never seen) and 50,000 candidates (that cap does
+  emit a warning). **No resume**: a cancelled scan restarts from the beginning on the next run
+  (it is incremental by relative path, so work is not lost, but it is not a resumable cursor).
+- [x] File records with format, size, page count, and status; unmatched files visible
+  (dedicated view + file reader, schema v9).
+- [x] Manual rescan. **Missing files only**: a rescan flips `library_files.status` between
+  `present` and `missing`; there is no separate `unreadable` state — an archive that exists but
+  cannot be parsed surfaces as an import warning, and an already-indexed corrupt file only fails
+  when opened.
+- [ ] Root-aware paths: move a root, keep the library. **Only add/remove exist; there is no
+  "relocate root" action.**
+- [x] Background scanning that does not freeze the UI (`spawn_blocking` + progress events).
+- [x] CBZ/ZIP and image-folder support (plus CBR/RAR and image PDF).
 
-Explicitly not in this increment: file watching, CBR/RAR, PDF.
+Originally deferred, since delivered: CBR/RAR and PDF. Still not in scope: **file watching**
+(the library only changes on a manual rescan).
 
 **Risks:** scan performance on network drives; case-insensitive path collisions; huge archives.
 **Acceptance:** a 5,000-file library indexes incrementally and remains browsable during the scan.
@@ -110,14 +128,22 @@ Explicitly not in this increment: file watching, CBR/RAR, PDF.
 
 Deliverables:
 
-- Reader state machine (`ARCHITECTURE.md` §12.2) and page manifest loading.
-- **Single page** with fit-width / fit-height / fit-page / actual size.
-- **Double-page spread** with correct pairing rules: cover alone, spreads aligned to odd/even,
-  manual override per file, and RTL support for manga.
-- **Continuous vertical** (webtoon) with virtualised page rendering.
-- Spread overrides persisted in `file_preferences`.
-- Preload of adjacent pages with cancellation.
-- Clear loading/error states per page, not a blank screen.
+- [x] Reader state machine (`ARCHITECTURE.md` §12.2) and page manifest loading.
+- [x] **Single page** with fit-width / fit-height / fit-page / actual size.
+- [x] **Double-page spread** with cover-alone and odd/even alignment, per-file spread override,
+  and RTL support (manga).
+- [~] **Continuous vertical** (webtoon) mode. **Rendered by mapping every page, not a
+  virtualiser**: `ReaderPage` mounts every page's `<img>` (eager within ±2, native
+  `loading="lazy"` beyond). Bounded in pixels on screen, but the DOM is not windowed, so a
+  900-page omnibus still mounts 900 nodes.
+- [x] Spread overrides persisted in `file_preferences` (and per file for split issues).
+- [~] Adjacent-page loading: pages within ±2 of the current page are marked `loading="eager"`,
+  the rest `loading="lazy"`. **No explicit preload with cancellation**, and no in-flight request
+  cancellation on fast turns.
+- [ ] Clear loading/error states per page, not a blank screen. **Not built at page level**: the
+  reader has a whole-issue `Spinner` and an issue-level failure panel, but the page `<img>` tags
+  have **no `onLoad`/`onError` handlers**, so a page that fails to load renders as a blank box
+  with no message.
 
 **Criticisms to keep in view:**
 
@@ -136,12 +162,16 @@ memory stays bounded over 100 turns in each mode.
 
 Deliverables:
 
-- Zoom to point (cursor/pinch anchor), not zoom to center.
-- Pan with pointer/trackpad, with clamping at page edges.
-- Fit modes and a "reset zoom" command.
-- Keyboard zoom shortcuts and a visible zoom indicator.
-- Bounded decoded image size and cache; zoom never re-fetches an unbounded full-resolution page.
-- Optional high-resolution re-request for zoomed-in views (a `maxWidth` bump), with a cache.
+- [x] Zoom to point (cursor anchor) — `useReaderZoom.zoomAt` anchors on the pointer.
+- [x] Pan with pointer/trackpad, clamped at page edges.
+- [x] Fit modes and a "reset zoom" command.
+- [x] Keyboard zoom shortcuts and a visible zoom indicator (percentage in the toolbar).
+- [~] Bounded decoded image size: only the width-scaled route is bounded
+  (`page_bytes_scaled` clamps 320–8192; `thumbnail` likewise). The unzoomed
+  `comic://page/{file}/{page}` route still returns the **full** entry up to the 128 MiB
+  `MAX_ENTRY_BYTES` cap, so a normal page turn decodes at native size.
+- [x] High-resolution re-request for zoomed views (`hiResWidth`), cached on disk by
+  `comic://` under the cover/page cache path.
 
 **Explicit non-goal:** deep-zoom tiling. This is a decision (D14). If real scans prove soft,
 schedule tiling as a separate research task with a clear memory budget, not as a "zoom improvement".
@@ -155,11 +185,13 @@ higher-resolution variant was requested), not a blurred CSS-scaled image.
 
 Deliverables:
 
-- None/slide/fade/cover transitions.
-- Respect `prefers-reduced-motion`.
-- No animation on rapid consecutive turns (animation must not lag behind input).
-- Transition duration and behaviour configurable; disableable.
-- No transition when preload has not completed; show a lightweight loading state instead.
+- [x] Instant / slide / fade / page-turn transitions.
+- [x] Respects `prefers-reduced-motion` (global CSS rule collapses durations).
+- [~] No animation on rapid consecutive turns: transitions are CSS-only with a short duration,
+  but there is no explicit "input faster than transition" bypass.
+- [x] Transition duration and behaviour configurable, and disableable ("instant").
+- [~] No per-page loading state at all, so there is also no preload gate: a transition can start,
+  and complete, before the page has even decoded.
 
 **Criticism:** transitions are a common source of perceived slowness in comic readers. Treat
 "instant" as the default and transitions as an option. Do not build a physics engine.
@@ -170,12 +202,17 @@ Deliverables:
 
 Deliverables:
 
-- Global, per-series, and per-file settings resolution (most specific wins).
-- Reading mode, reading direction, fit mode, spread behaviour, background colour, brightness,
-  gamma, and toolbar auto-hide.
-- Page number/percentage display and a jump-to-page control.
-- Full-screen and distraction-free mode.
-- All controls keyboard-accessible; settings persist offline.
+- [~] Global, per-series and per-file resolution. Implemented for **reading direction** (global →
+  series → file) and **spread offset** (per file). Reading mode, fit, background, brightness and
+  gamma are **global only**; there is no per-series override for them.
+- [~] Reading mode, direction, fit, spread, background, brightness and gamma all exist.
+  **Toolbar auto-hide is not implemented**; the toolbar toggles manually (`showInterface`).
+- [x] Page number/percentage display and a jump-to-page control.
+- [x] Full-screen mode. Distraction-free is approximated by hiding the chrome, not a separate mode.
+- [~] Controls are keyboard-driven via the command registry; **no focus trap in dialogs** (Tab
+  leaves the modal) and accessibility labels are sparse — 58 `aria-label` occurrences in 14
+  files, concentrated in the reader and library; the collections, orders, unmatched and history
+  screens are mostly unlabelled.
 
 **Criticism:** preference layering is easy to implement badly. Use one resolver function with
 tests, not scattered `series?.mode ?? global.mode ?? 'single'` expressions.
@@ -186,12 +223,24 @@ tests, not scattered `series?.mode ?? global.mode ?? 'single'` expressions.
 
 Deliverables:
 
-- Cover grid with virtualisation and variable cover aspect ratios.
-- Cover extraction and cached thumbnails (with placeholder for missing covers).
-- Sort (title, added, release date, last read) and filters (format, read status, publisher).
-- Continue-reading row and "recently added" row.
-- List view as an alternative for large libraries.
-- Empty, scanning, and error states.
+- [~] Cover grid with **progressive rendering**, not true virtualisation: `useProgressiveList`
+  grows the slice by 120 items via an IntersectionObserver sentinel. The DOM stays bounded in
+  practice, but off-screen items remain mounted once loaded (no recycling). Cover aspect ratios
+  are fixed at 2/3, so variable-ratio covers are letterboxed rather than laid out natively.
+- [x] Cover extraction and cached thumbnails on disk, with an initials placeholder for missing
+  or failed covers.
+- [x] Sort (title, added, release date, last read) and filters (read status, publisher,
+  universe).
+- [~] **Format filter is missing.** `LibraryFilter` (`src/lib/types.ts`) and
+  `repo::library_snapshot` support search/status/universe/publisher/series, not format;
+  `LibraryPage` therefore has no format select, though `filter_options` already returns the
+  formats used by Search. Adding it is a DTO + WHERE clause + one `<select>`.
+- [x] Continue-reading row ("Continue your series") and "recently added" sort.
+- [x] List view as an alternative for large libraries.
+- [~] Empty and scanning states exist (empty `EmptyState`, plus the global import-activity
+  panel in `AppShell`); **the shelf has no query-error state** — `empty` requires
+  `snapshot.isSuccess`, so a failed `library` load renders neither the empty copy nor an error
+  message, just the header over a blank area.
 
 **Risks:** thumbnail generation storms on first open; layout jank from mixed aspect ratios.
 **Acceptance:** 5,000 covers scroll at interactive frame rates; thumbnails generate in the
@@ -203,19 +252,25 @@ background and never block the grid.
 
 Deliverables:
 
-- Series list and detail views with issues ordered by number, with natural sort.
-- Manual issue reordering for specials/annuals that break numeric order.
-- Series metadata editing with metadata lock. **Metadata lock implemented (schema v7);
-  franchise grouping is not (publisher/universe only).**
-- Publisher and franchise grouping.
-- Variant handling as designed in `DATA_MODEL.md` (decision Q2).
-- Unmatched files view with a "match to issue" flow. **Implemented (schema v9): `/unmatched`
-  lists loose files (imported with "keep unmatched"), `/file/:id` reads them with file-scoped
-  progress/bookmarks, and matching reuses the file row so progress survives. Manual matching
-  only; provider-driven match proposals are still open.**
-- Multi-issue files (omnibus CBZ/CBR/PDF). **Implemented (schema v10): the contents page is OCR'd,
-  chapters become issues with `page_offset`/`page_count`, and the reader shows only each issue's
-  slice. Split is proposed, editable, and never applied without confirmation.**
+- [~] Series list and detail views with issues ordered by number. Ordering is numeric via
+  `metadata::parse_number` → `issues.sort_number` (`ORDER BY i.sort_number`), so 9 sorts before
+  10; **no test covers a series with more than 4 issues**, so the 9-vs-10 case is unverified.
+- [ ] Manual issue reordering for specials/annuals that break numeric order. **Not built**;
+  ordering is derived from `sort_number`, and editing the issue number is the only workaround.
+- [x] Series metadata editing with metadata lock (schema v7): lock checkbox, auto-lock on edit,
+  lock-aware bulk edits, forced refresh.
+- [~] Publisher and universe values exist on series/issues: the library shelf filters by both,
+  series cards display them, and series create/edit accepts them. **There is no grouping UI** —
+  `SeriesPage` only has a text filter, and there is no franchise column, so neither publisher,
+  universe, nor franchise can group the series list.
+- [x] Variant handling as designed in `DATA_MODEL.md` (decision Q2): `variant_of`, variant count,
+  cycle rejection, variant compare view in the reader.
+- [x] Unmatched files view with a "match to issue" flow (schema v9): `/unmatched` lists loose
+  files, `/file/:id` reads them with file-scoped progress/bookmarks, and matching reuses the file
+  row so progress survives. Manual matching only; provider-driven match proposals are still open.
+- [x] Multi-issue files (omnibus CBZ/CBR/PDF, schema v10): the contents page is OCR'd, chapters
+  become issues with `page_offset`/`page_count`, and the reader shows only each issue's slice.
+  Split is proposed, editable, and never applied without confirmation.
 
 **Criticism:** automatic series grouping from filenames will be wrong often. Ship manual grouping
 and correction before promising automation.
@@ -226,13 +281,18 @@ and correction before promising automation.
 
 Deliverables:
 
-- Resume at last page (optionally with scroll offset in continuous mode).
-- Mark as read/unread; mark up to a page; mark a whole series.
-- Read status derived from file progress and reconciled to issue status.
-- Continue-reading and completed lists.
-- Progress survives rematching a file to an issue (with the explicit recompute rule from
-  `DATA_MODEL.md` §6.4).
-- Throttled, crash-safe progress writes.
+- [x] Resume at last page, including the fractional scroll offset in continuous modes.
+- [x] Mark as read/unread works per issue and per series (`set_issue_status`,
+  `set_series_status`), and "mark read up to page N" is exposed: `api.markIssueToPage` →
+  `mark_issue_to_page` → `repo::mark_to_page`, wired to the "Mark read to page" form in
+  `IssueEditor` (clamped to the page count, completes on the last page). **Bulk mark-to-page
+  across a selection is not built** — the library bulk editor only patches metadata/status.
+- [x] Read status derived from progress and reconciled to issue status.
+- [x] Continue-reading row and a History page (completed list).
+- [x] Progress survives rematching a file to an issue (schema v9 `adopt_file_progress`) and
+  splitting a file (schema v10 rebases the containing range).
+- [x] Throttled progress writes (400 ms debounce + flush on unmount), each a single atomic
+  upsert (no explicit transaction needed because no statement sequence is involved).
 
 **Criticism:** the file-vs-issue progress duality is the most likely source of user-visible bugs.
 Write tests for the reconciliation before building UI on top.
@@ -243,14 +303,20 @@ Write tests for the reconciliation before building UI on top.
 
 Deliverables:
 
-- `ComicInfo.xml` parsing (safe XML, size limits).
-- Filename parser with confidence scoring and a preview before applying.
-- Provider adapters behind one trait, user-enabled, offline-tolerant, rate-limited.
-- Match proposals with reasons; accept/reject; never silently overwrite user edits.
-- Provenance display ("this synopsis came from X on date Y").
-- Manual metadata editing with lock. **Lock implemented (schema v7); editing, automatic
-  lock-on-save, lock-aware bulk edits and forced refresh exist. Providers are not built.**
-- Cache and snapshot provider responses; all fetched data remains available offline.
+- [x] `ComicInfo.xml` parsing (`quick-xml`, no DTD/entity expansion; the entry is skipped when
+  over the 4 MiB `MAX_XML_BYTES` cap and the read is bounded by `.take()`).
+- [~] Filename parser exists (`metadata::parse_filename`) and every import is previewed before
+  it is applied. **No confidence scoring** — the preview shows the parse but does not rank it.
+  `parse_filename`/`parse_number` have no unit tests of their own; coverage is the integration
+  test `filename_parsing_handles_common_patterns`.
+- [ ] Provider adapters behind one trait, user-enabled, offline-tolerant, rate-limited.
+  **Not started.** No `Provider` trait, no HTTP client, no caching.
+- [ ] Match proposals with reasons; accept/reject; never silently overwrite user edits.
+  **Not started.** The matching that exists is manual (`/unmatched`).
+- [ ] Provenance display ("this synopsis came from X on date Y"). **Not started.**
+- [x] Manual metadata editing with lock (schema v7): editing, auto lock-on-save, lock-aware bulk
+  edits, forced refresh from file.
+- [ ] Cache and snapshot provider responses. **Not applicable yet** (no providers).
 
 **Criticisms:**
 
@@ -266,13 +332,16 @@ Deliverables:
 
 Deliverables:
 
-- Create/edit/reorder an order of issues (and unmatched files).
-- Sections/group labels ("Act I", "Before the war").
-- Optional/skippable items.
-- Per-profile order progress and next-unread item.
-- Import/export of a versioned JSON order with UUIDs and unresolved placeholders.
-- Explicit statement that orders are independent of series and publisher.
-- No pretense of a single canonical chronology.
+- [~] Create/edit/reorder an order of issues. **Unmatched files cannot be added**: order items
+  are `issue_id` FKs only, so a loose file must be matched first.
+- [ ] Sections/group labels ("Act I", "Before the war"). **Not built**; an order is a flat list.
+- [ ] Optional/skippable items. **Not built.**
+- [~] Order progress and next-unread item exist (OrderDetailPage "Up next"), but there is **no
+  profile concept**, so "per-profile" is not implemented.
+- [ ] Import/export of a versioned JSON order with UUIDs and unresolved placeholders.
+  **Not built.** The only export is a whole-library JSON snapshot.
+- [x] Orders are independent of series and publisher (flat list of issue references).
+- [x] No canonical chronology is asserted; orders are curated and named by the user.
 
 **Criticism:** "automatic chronological order" is not a solvable problem in general. In-universe
 dates are inconsistent, flashbacks break naive sorting, and tie-ins are debatable. Ship curated
@@ -284,13 +353,18 @@ orders with optional generation from `story_start_date` as a draft. This is deci
 
 Deliverables:
 
-- FTS5 search over titles, creators, characters, arcs, events, publishers, and safe text.
-  **Implemented** for titles, series, numbers, creators, publishers, descriptions and bookmark
-  notes; character/arc/event text arrives with the universe schema.
-- Filters: publisher, series, year range, read status, format, collection, character, arc.
-- Sort options and keyset pagination.
-- Search result snippets generated **after** spoiler filtering.
-- Keyboard-first search with recent searches.
+- [~] FTS5 search over titles, series, numbers, creators, publishers, descriptions and bookmark
+  notes. **No character/arc/event text** (those schemas do not exist yet).
+- [~] Filters: publisher, series, year range, read status and format are exposed in
+  `SearchPage`; `universe` and `collectionId` exist in `SearchFilter`/`repo::search_filtered`
+  but **have no UI control on the search page** (the collection filter is only exercised by the
+  smart-collection test). **Character and arc filters are not** (no data).
+- [x] Sort options and keyset pagination (`nextCursor`, stable cursor values).
+- [x] Snippets are generated with SQLite `snippet()` and then **dropped entirely for any issue
+  `apply_spoilers` marked protected** (`repo::search_filtered`), so a hidden synopsis cannot leak
+  through an excerpt. Residual risk: an issue whose *description* matched still appears in the
+  result list, which can itself hint at content.
+- [x] Keyboard-first search (Ctrl/Cmd+K) with recent searches.
 
 **Criticism:** spoiler-safe search is subtle. A character name in a result can spoil. Plan a
 dedicated test suite with a profile whose frontier is mid-series.
@@ -301,11 +375,19 @@ dedicated test suite with a profile whose frontier is mid-series.
 
 Deliverables:
 
-- Central command registry with scopes and user-remappable bindings.
-- Default bindings for page turn, jump, zoom, mode, fullscreen, bookmark, and search.
-- Conflict detection and a cheat sheet.
-- Focus management in dialogs and the reader.
-- Every important mouse action has a keyboard equivalent.
+- [~] Central command registry (`src/lib/shortcuts.ts`) with user-remappable bindings stored in
+  settings. **No scopes**: the reader and the shell both listen on `window`, so bindings are not
+  context-scoped.
+- [~] Defaults cover page turn, next/prev issue, fullscreen, zoom, bookmark and search.
+  **No registry binding for jump-to-page**, and reading mode/fit are hardcoded keys (`D` cycles
+  modes, `1`–`4` pick fit, `H` toggles chrome) that cannot be remapped and do not appear in the
+  conflict checker.
+- [x] Conflict detection plus a shortcut cheat sheet in Settings.
+- [~] Focus handling exists in the reader, but dialogs have **no focus trap** — `Modal`
+  (`src/components/ui.tsx`) focuses its container, restores focus on close and closes on Escape,
+  but Tab still escapes the dialog.
+- [~] Most reading actions have a keyboard path; a few pointer-only affordances (spread-offset
+  cycling via the toolbar) have no binding.
 
 ### CORE-13 — Custom collections
 
@@ -313,13 +395,17 @@ Deliverables:
 
 Deliverables:
 
-- Create/rename/delete collections with covers.
-- Add series, issues, arcs, characters, events, orders, and unmatched files.
-- Manual ordering and notes.
-- A fixed, typed smart-collection rule set compiled to SQL (no arbitrary expressions).
-  **Implemented (schema v8): 15 allowlisted fields × 10 operators, bound values, empty rules
-  match nothing, smart membership flows through detail/counts/search filters.**
-- Collection membership visible on entity detail pages.
+- [x] Create/rename/delete collections with covers and a description.
+- [~] Add **series** and **issues** (series expands to its issues). **Arcs, characters, events
+  and unmatched files cannot be added** — `collection_items` stores `issue_id` only, and there
+  is no collection UI on the unmatched page.
+- [~] Manual ordering works (`collection_items.position`), including a sort-mode selector for
+  smart collections. **Per-item notes are not implemented** (no notes column, no UI); only a
+  collection-level description exists.
+- [x] Typed smart-collection rules compiled to SQL (schema v8): 15 allowlisted fields × 10
+  operators, bound values, `LIKE` escaping, numeric validation, empty rules match nothing.
+- [ ] Collection membership visible on entity detail pages. **Not implemented** — series and
+  issue views do not list which collections contain them.
 
 ### CORE-14 — Spoiler protection
 
@@ -327,14 +413,20 @@ Deliverables:
 
 Deliverables:
 
-- `spoiler_read_marks` model from `DATA_MODEL.md` §13.4 (conservative v1).
-- Per-profile spoiler mode; first-run choice of starting point (Q7).
-- Hidden: synopses, character lists, arcs/events whose reveal is after the frontier, future-issue
-  previews, and spoiler-sensitive search results.
-- A visible indicator when content is hidden because of spoilers, with an explicit "reveal"
-  action (which is recorded).
-- The same filter used by detail views, list views, and search.
-- Tests for every surface that can leak.
+- [~] Frontier model implemented as `spoiler_reveals` plus per-series/order progress, using the
+  conservative v1 rule from `DATA_MODEL.md` §13.4. There is **no** separate
+  `spoiler_read_marks` table; the frontier is derived from `progress` and `spoiler_reveals`.
+- [ ] Per-profile spoiler mode; first-run choice of starting point (Q7). **Not built** — there is
+  no profile concept, so spoiler protection is a single global setting.
+- [~] Hidden: issue descriptions/synopses, future issues in lists, and search results are filtered
+  by `repo::apply_spoilers`. **Character/arc/event hiding is not applicable yet** (no such data).
+- [x] A visible indicator when content is hidden, with an explicit "reveal" action recorded in
+  `spoiler_reveals` (IssueEditor).
+- [~] The same shared filter is used by issue, series, search, order and collection queries.
+  **Issue detail text nulling happens after the row is built**, so a raw DB read could bypass it.
+- [~] Tests exist for `library_snapshot`, `issue`, `order_detail` and `search_filtered`.
+  **`series_detail`, `collection_detail`, `reading_history` and `issue_variants` route through
+  `apply_spoilers` but have no per-surface leak test.**
 
 **Criticism:** this is the feature most likely to be declared done while still leaking. Define
 the surfaces explicitly (issue detail, series detail, bookshelf hover, search, reading order
@@ -347,7 +439,7 @@ preview, character page, arc page, collections) and test each one. Do not rely o
 These features depend on CORE data and should not begin until the corresponding CORE items are
 stable. Several are research projects, not tickets.
 
-### LATER-1 — Guided panel reading
+### LATER-1 — Guided panel reading  — `[ ] not started`
 
 Step through panels rather than pages: focus, zoom, and navigate panel-by-panel, with a page
 overview.
@@ -356,7 +448,7 @@ overview.
 state machine. It also interacts badly with double-page spreads and continuous mode.
 **Decision needed:** is guided reading a separate mode or an overlay on the existing modes?
 
-### LATER-2 — Panel detection
+### LATER-2 — Panel detection  — `[ ] not started`
 
 Automatic panel boundary detection for archives without panel metadata.
 
@@ -366,16 +458,18 @@ and licensing questions. Expect manual correction to be necessary.
 **Recommendation:** start with detection into an editable, per-page panel table; do not ship
 detection as authoritative. Store results so failures are visible and fixable.
 
-### LATER-3 — Character profiles
+### LATER-3 — Character profiles  — `[ ] not started`
 
 Character pages with descriptions, aliases, first appearance, portraits, and a list of
 appearances.
 
-**Depends on:** `characters`, `character_aliases`, `character_appearances` (schema now, UI later).
+**Depends on:** `characters`, `character_aliases`, `character_appearances`. **None of these
+tables exist yet** — the schema stops at v10 with no character/arc/timeline/location tables, so
+this is an additive migration plus UI, not UI on existing schema.
 **Hard parts:** identity (same character across reboots/universes), data volume, spoiler-safe
 appearance lists, and sourcing. Do not expect a complete character database from providers.
 
-### LATER-4 — Relationship maps
+### LATER-4 — Relationship maps  — `[ ] not started`
 
 A graph of character relationships with types and directions.
 
@@ -384,7 +478,7 @@ A graph of character relationships with types and directions.
 and representing changing relationships over time. A static graph over the whole run is
 misleading; consider relationship states per era/arc.
 
-### LATER-5 — Universe timeline
+### LATER-5 — Universe timeline  — `[ ] not started`
 
 A visual timeline of events, arcs, and issues, with in-universe and publication views.
 
@@ -393,7 +487,7 @@ A visual timeline of events, arcs, and issues, with in-universe and publication 
 mixes publishers needs curatorship. Expect this to be a curated view, not an automatically
 generated truth.
 
-### LATER-6 — Story arc tracking
+### LATER-6 — Story arc tracking  — `[ ] not started`
 
 Arc progress across series and publishers, with "continue this arc" and arc-level spoiler state.
 
@@ -401,7 +495,7 @@ Arc progress across series and publishers, with "continue this arc" and arc-leve
 **Hard parts:** arcs with optional tie-ins, reading order vs arc order, and marking an arc read
 when its issues were read out of order.
 
-### LATER-7 — Location database
+### LATER-7 — Location database  — `[ ] not started`
 
 Locations, appearances, and relationships (part of, located in, destroyed in).
 
@@ -410,7 +504,7 @@ additive migration).
 **Hard parts:** spoilers (a location's destruction is an event), naming collisions (multiple
 "Gotham"s), and limited provider data. This is the least standardised domain; expect manual entry.
 
-### LATER-8 — Character appearance tracker
+### LATER-8 — Character appearance tracker  — `[ ] not started`
 
 A per-character timeline of appearances with filters and progress ("which appearances have I not
 read?").
@@ -419,7 +513,7 @@ read?").
 **Hard parts:** volume (thousands of rows per character), missing data, and the difference between
 a cameo and a meaningful appearance. Needs pagination and an explicit data-quality indicator.
 
-### LATER-9 — Multi-device synchronisation
+### LATER-9 — Multi-device synchronisation  — `[ ] not started`
 
 Sync reading progress, bookmarks, collections, and reading orders across devices.
 
@@ -435,9 +529,14 @@ until there is a concrete user requirement. Local-first means sync must never be
 
 ## 6. OPTIONAL
 
-### OPTIONAL-1 — Statistics dashboard
+### OPTIONAL-1 — Statistics dashboard  — `[~] basic stats done, no dashboard`
 
-Reading time, pages read, issues completed, streaks, series breakdowns, and a yearly summary.
+- [x] Reading time, pages read, issues completed, streaks, and per-series breakdowns
+  (`repo::stats` + `StatsPage`).
+- [ ] Yearly summary. **Not built.**
+- [ ] Idle detection for reading time. **Not built** — session duration is wall clock between
+  open and close, so leaving the reader open inflates it.
+- [ ] Erase statistics without erasing progress. **Not built** (no stats-reset action).
 
 **Why optional:** it is a nice-to-have that depends on `reading_sessions`, which is a private,
 high-volume table. Collecting it without a dashboard is wasted storage; building a dashboard
@@ -453,18 +552,24 @@ without reliable collection produces misleading numbers.
 The order below front-loads risk and keeps a usable product at every point.
 
 ```text
-Phase 0   Foundations F1-F10
-Phase 1   CORE-1 library import  ->  CORE-2 single-page reader (CBZ only)
-Phase 2   CORE-6 bookshelf + CORE-7 series organisation
-Phase 3   CORE-3 zoom + CORE-4 transitions + CORE-5 customisation
-Phase 4   CORE-8 reading tracker + CORE-2 spread/continuous modes
-Phase 5   CORE-9 metadata (ComicInfo first, providers second)
-Phase 6   CORE-11 search + CORE-12 shortcuts
-Phase 7   CORE-13 collections + CORE-10 reading orders
-Phase 8   CORE-14 spoiler protection across all surfaces
-Phase 9   Hardening: performance, accessibility, packaging, migrations, diagnostics
-Phase 10  LATER features in the order that user demand justifies
+Phase 0   Foundations F1-F10                              ~ mostly done (F3, F8, F10 partial)
+Phase 1   CORE-1 library import -> CORE-2 single page     done, plus CBR/PDF/folders
+Phase 2   CORE-6 bookshelf + CORE-7 series organisation    done, plus unmatched + omnibus split
+Phase 3   CORE-3 zoom + CORE-4 transitions + CORE-5 prefs  done (per-series prefs partial)
+Phase 4   CORE-8 tracker + CORE-2 spread/continuous modes  done (bulk mark-to-page not built)
+Phase 5   CORE-9 metadata                                  ComicInfo done; providers NOT started
+Phase 6   CORE-11 search + CORE-12 shortcuts               done (scopes + some filters missing)
+Phase 7   CORE-13 collections + CORE-10 reading orders     done (sections/import-export missing)
+Phase 8   CORE-14 spoiler protection across all surfaces   partial (global only, not every surface)
+Phase 9   Hardening                                        not started (a11y, diagnostics, packaging CI)
+Phase 10  LATER features                                   not started
 ```
+
+Remaining CORE work, in dependency order: provider adapters + match proposals (CORE-9),
+per-profile spoilers with per-surface leak tests (CORE-14), order import/export + sections
+(CORE-10), bulk mark-to-page and manual issue ordering (CORE-8/CORE-7), missing bookshelf format
+filter and query-error state (CORE-6), root relocation (CORE-1), per-page load/error states
+(CORE-2), then the hardening pass (a11y/focus traps, diagnostics, CI).
 
 **Why spoilers are phase 8, not phase 1:** the data model supports them from the start, but the
 filter must cover surfaces that only exist later (search, orders, characters). Implementing the
@@ -482,35 +587,35 @@ coupled model "temporarily"; that is exactly the rewrite the design requirements
 
 These are not features and must not be deferred to the end:
 
-| Area | Requirement |
-| --- | --- |
-| Offline | Every screen works with the network disabled; test this in CI or manually each phase |
-| Performance | Budgets for cold start, library scroll, reader open, and memory; measure, do not guess |
-| Accessibility | Keyboard-first, focus rings, screen reader labels, reduced motion, sufficient contrast |
-| Error UX | Missing file, corrupt archive, DB busy, permission denied each have a designed state |
-| Migrations | Every schema change has a migration, a backup step, and a test from the previous version |
-| Security | New inputs (archives, XML, provider HTML) get limits and tests before release |
-| Diagnostics | Logs and a support bundle that do not leak paths or keys |
-| Packaging | Installers and code signing for each target; test on a clean machine |
+| Area | Requirement | State |
+| --- | --- | --- |
+| Offline | Every screen works with the network disabled; test this in CI or manually each phase | `[x]` Fonts bundled locally, no runtime network calls |
+| Performance | Budgets for cold start, library scroll, reader open, and memory; measure, do not guess | `[~]` Import scans metadata only (`archive::scan_*`), so memory is flat by construction, but **no measurement is recorded** in `HANDOVER.md`; no automated budgets |
+| Accessibility | Keyboard-first, focus rings, screen reader labels, reduced motion, sufficient contrast | `[~]` Keyboard + reduced motion done; sparse labels, no dialog focus trap |
+| Error UX | Missing file, corrupt archive, DB busy, permission denied each have a designed state | `[~]` Reader/import have states; DB-busy and permission-denied are generic errors |
+| Migrations | Every schema change has a migration, a backup step, and a test from the previous version | `[x]` v1→v10 with backup-before-migrate and a v4→current test |
+| Security | New inputs (archives, XML, provider HTML) get limits and tests before release | `[~]` Entry size caps, safe XML, CSP; no fuzzing of the new OCR/archive paths |
+| Diagnostics | Logs and a support bundle that do not leak paths or keys | `[ ]` Not started |
+| Packaging | Installers and code signing for each target; test on a clean machine | `[~]` Windows NSIS + portable exe built; unsigned, not smoke-tested on Windows |
 
 ---
 
 ## 9. Testing by stage
 
-| Stage | Must be tested |
-| --- | --- |
-| Foundations | migration runner, backup/restore, protocol handler, error serialization |
-| CORE-1 | scanner idempotency, cancellation, missing files, case collisions |
-| CORE-2/3 | spread pairing, fit modes, zoom anchor math, memory bounds |
-| CORE-5 | preference resolution precedence |
-| CORE-6/7 | virtualisation, cover placeholders, natural sort, unmatched match keeps progress, omnibus split keeps progress |
-| CORE-8 | progress reconciliation across rematching and multi-issue files |
-| CORE-9 | XML safety, filename parsing, match acceptance/rejection, offline fallback |
-| CORE-10 | reorder correctness, import/export round-trip, unresolved placeholders |
-| CORE-11 | spoiler-filtered search, pagination stability |
-| CORE-13 | smart rule compilation (no injection), orphan cleanup |
-| CORE-14 | every surface that can leak a spoiler |
-| LATER | each feature needs its own accuracy and performance criteria before starting |
+| Stage | Must be tested | State |
+| --- | --- | --- |
+| Foundations | migration runner, backup/restore, protocol handler, error serialization | `[~]` migration runner covered by the v4→current test; **backup/restore, the `comic://` handler and error serialization have no test** |
+| CORE-1 | scanner idempotency, cancellation, missing files, case collisions | `[~]` idempotency, missing files, single-file roots; cancellation only covers a pre-cancelled control plus the import loop guard, not a mid-scan cancel; no case-collision test |
+| CORE-2/3 | spread pairing, fit modes, zoom anchor math, memory bounds | `[~]` spread pairing tested; zoom math and memory bounds are not |
+| CORE-5 | preference resolution precedence | `[~]` only reading direction has a precedence test (file → series → global); mode/fit/background/gamma have no per-series resolution to test |
+| CORE-6/7 | virtualisation, cover placeholders, numeric ordering, unmatched match keeps progress, omnibus split keeps progress | `[~]` match-keeps-progress and split-keeps-progress covered; **ordering, cover placeholders and the progressive list have no test** (no test imports a series with more than 4 issues, so 9-before-10 is unproven) |
+| CORE-8 | progress reconciliation across rematching and multi-issue files | `[x]` covered by the unmatched and split tests, plus `mark_to_page_sets_position_and_completes_on_last_page` |
+| CORE-9 | XML safety, filename parsing, match acceptance/rejection, offline fallback | `[~]` ComicInfo parsing and filename parsing are exercised by integration tests, but **the XML size cap / DTD refusal has no dedicated test**; providers do not exist |
+| CORE-10 | reorder correctness, import/export round-trip, unresolved placeholders | `[~]` reorder covered; import/export does not exist |
+| CORE-11 | spoiler-filtered search, pagination stability | `[x]` covered |
+| CORE-13 | smart rule compilation (no injection), orphan cleanup | `[~]` injection covered; orphan cleanup N/A (FKs) |
+| CORE-14 | every surface that can leak a spoiler | `[~]` tests cover `library_snapshot`, `issue`, `order_detail` and `search_filtered`; **`series_detail`, `collection_detail`, `reading_history` and `issue_variants` call `apply_spoilers` but have no leak test** |
+| LATER | each feature needs its own accuracy and performance criteria before starting | `[ ]` nothing started |
 
 ---
 
@@ -537,26 +642,38 @@ These are not features and must not be deferred to the end:
 
 These block Phase 0/1 and are repeated from `ARCHITECTURE.md` and `DATA_MODEL.md`:
 
-1. **D1** — Confirm files and catalog issues are separate (the foundation of the schema).
-2. **D2** — Confirm SQLite + `rusqlite` rather than `sqlx`.
-3. **D3** — Confirm the `comic://` custom protocol for page delivery.
-4. **D5** — Decide whether CBR/RAR is required at launch (licensing).
-5. **D6** — Confirm spoiler filtering is enforced in Rust/SQL, not React.
-6. **D7** — Choose the TypeScript binding generator via a short spike.
-7. **Q1–Q8** — The data-model questions in `DATA_MODEL.md` §20.
-8. **Phase order** — Confirm whether reading orders move earlier than phase 7.
+Status: the first seven are effectively settled by the implementation; only D7 and the phase
+order are still open.
+
+1. `[x]` **D1** — Files and catalog issues are separate (`library_files` vs `issues`, joined by
+   `issues.file_id`; v10 allows many issues per file).
+2. `[x]` **D2** — SQLite + `rusqlite`.
+3. `[x]` **D3** — `comic://` custom protocol for page delivery.
+4. `[x]` **D5** — CBR/RAR included, via the pure-Rust `unrar-rs` crate.
+5. `[x]` **D6** — Spoiler filtering is enforced in Rust (`repo::apply_spoilers`), not React.
+6. `[ ]` **D7** — TypeScript binding generator. Still open; DTOs are handwritten.
+7. `[~]` **Q1–Q8** — Answered implicitly by the schema as built; the document has not been
+   updated to record the answers.
+8. `[ ]` **Phase order** — Not revisited; the implemented order differs from §7 (orders and
+   collections landed alongside search, spoilers are global not per-profile).
 
 ---
 
 ## 12. What "done" looks like for the first public CORE release
 
-- A user adds a folder, the library indexes, and every CBZ is readable without internet.
-- Single page, spread, and continuous modes work, with real zoom, per-series preferences, and
-  keyboard control.
-- The bookshelf and series views stay responsive at thousands of files.
-- Reading progress resumes correctly, including after files are moved, rematched, or replaced.
-- Metadata is optional, reviewable, provenance-tracked, and cached for offline use.
-- Reading orders can combine any issues from any publishers and track progress independently.
-- Search is fast and spoiler-safe.
-- The app recovers cleanly from missing files, corrupt archives, and a failed migration.
-- There is no telemetry, no cloud dependency, and no required account.
+- [x] A user adds a folder, the library indexes, and every CBZ is readable without internet.
+- [~] Single page, spread and continuous modes work with real zoom and keyboard control, but
+  **per-series preferences only cover reading direction**, not mode/fit/background.
+- [~] Bookshelf and series views stay responsive: progressive rendering keeps the DOM bounded,
+  **but there is no windowed virtualiser and no measured test at 5,000 files**.
+- [~] Progress resumes correctly, including after rematch and split. **Moving/replacing a file is
+  not handled** (no relocate-root flow).
+- [ ] Metadata is optional and reviewable, but **not provenance-tracked or provider-cached** —
+  there are no providers. ComicInfo and filename parsing are the whole story.
+- [~] Orders combine issues from any publishers and track progress. **No sections, no optional
+  items, no import/export, and not per-profile.**
+- [~] Search is fast and spoiler-safe on the surfaces it covers, but not every leak surface is
+  tested.
+- [~] Recovers from missing files and a failed migration (backup + test); **corrupt archives are
+  a generic error**, and DB-busy has no designed state.
+- [x] No telemetry, no cloud dependency, no required account.
