@@ -691,7 +691,7 @@ fn import_file(
     )?;
     tx.execute(
         "INSERT INTO progress (issue_id, page, total, status, updated_at)
-         SELECT id, 0, ?1, 'unread', ?2 FROM issues WHERE file_id = ?3",
+         SELECT id, 0, coalesce(page_count, ?1), 'unread', ?2 FROM issues WHERE file_id = ?3",
         params![pages.len() as i64, timestamp, file_id],
     )?;
     tx.commit()?;
@@ -775,12 +775,16 @@ pub fn rescan_with_progress(
     Ok(results)
 }
 
+// Column order is positional and shared by every issue query. `page_count`
+// (index 16) is the issue's share of the file, and index 26 is the offset into
+// the file where that share starts (multi-issue archives, schema v10).
 pub const DISPLAY_FIELDS: &str =
     "i.id, i.series_id, s.title, i.title, i.number, i.sort_number, i.volume, i.publisher, \
      i.universe, i.release_date, i.writer, i.artist, i.cover_artist, i.description, i.file_id, \
-     f.path, coalesce(f.page_count, 0), coalesce(p.page, 0), coalesce(p.status, 'unread'), p.last_read_at, \
+     f.path, coalesce(i.page_count, max(coalesce(f.page_count, 0) - i.page_offset, 0)), \
+     coalesce(p.page, 0), coalesce(p.status, 'unread'), p.last_read_at, \
      p.completed_at, coalesce(f.status, 'missing'), i.variant_of, i.edition, \
-     (SELECT count(*) FROM issues v WHERE v.variant_of = i.id), i.metadata_locked";
+     (SELECT count(*) FROM issues v WHERE v.variant_of = i.id), i.metadata_locked, i.page_offset";
 
 pub fn map_issue(row: &rusqlite::Row<'_>) -> rusqlite::Result<IssueCard> {
     map_issue_offset(row, 0)
@@ -816,5 +820,6 @@ pub fn map_issue_offset(row: &rusqlite::Row<'_>, base: usize) -> rusqlite::Resul
         edition: row.get(base + 23)?,
         variant_count: row.get(base + 24)?,
         metadata_locked: row.get::<_, i64>(base + 25)? != 0,
+        page_offset: row.get(base + 26)?,
     })
 }

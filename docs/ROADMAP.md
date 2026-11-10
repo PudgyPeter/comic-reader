@@ -89,7 +89,8 @@ Do not build a reader screen before F2/F4 exist, or you will rewrite it.
 Deliverables:
 
 - Add/remove library roots through a native folder picker; paths stay in Rust.
-  **A root may be a single large archive file too (multi-GB omnibus CBZ/CBR/PDF).**
+  **A root may be a single large archive file too (multi-GB omnibus CBZ/CBR/PDF), and one file
+  can back several issues after an OCR-driven split.**
 - Recursive scan with progress, cancellation, and resume.
 - File records with format, size, page count, and status; unmatched files visible.
   **Unmatched files have a dedicated view + file reader (schema v9).**
@@ -212,6 +213,9 @@ Deliverables:
   lists loose files (imported with "keep unmatched"), `/file/:id` reads them with file-scoped
   progress/bookmarks, and matching reuses the file row so progress survives. Manual matching
   only; provider-driven match proposals are still open.**
+- Multi-issue files (omnibus CBZ/CBR/PDF). **Implemented (schema v10): the contents page is OCR'd,
+  chapters become issues with `page_offset`/`page_count`, and the reader shows only each issue's
+  slice. Split is proposed, editable, and never applied without confirmation.**
 
 **Criticism:** automatic series grouping from filenames will be wrong often. Ship manual grouping
 and correction before promising automation.
@@ -499,7 +503,7 @@ These are not features and must not be deferred to the end:
 | CORE-1 | scanner idempotency, cancellation, missing files, case collisions |
 | CORE-2/3 | spread pairing, fit modes, zoom anchor math, memory bounds |
 | CORE-5 | preference resolution precedence |
-| CORE-6/7 | virtualisation, cover placeholders, natural sort, unmatched match keeps progress |
+| CORE-6/7 | virtualisation, cover placeholders, natural sort, unmatched match keeps progress, omnibus split keeps progress |
 | CORE-8 | progress reconciliation across rematching and multi-issue files |
 | CORE-9 | XML safety, filename parsing, match acceptance/rejection, offline fallback |
 | CORE-10 | reorder correctness, import/export round-trip, unresolved placeholders |

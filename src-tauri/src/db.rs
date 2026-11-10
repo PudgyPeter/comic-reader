@@ -5,7 +5,7 @@ use rusqlite::Connection;
 
 use crate::error::{AppError, AppResult};
 
-pub const SCHEMA_VERSION: i64 = 9;
+pub const SCHEMA_VERSION: i64 = 10;
 
 pub struct Database {
     conn: Mutex<Connection>,
@@ -79,6 +79,9 @@ impl Database {
             }
             if version < 9 {
                 conn.execute_batch(MIGRATION_9)?;
+            }
+            if version < 10 {
+                conn.execute_batch(MIGRATION_10)?;
             }
             if version < SCHEMA_VERSION {
                 conn.execute(
@@ -414,6 +417,142 @@ CREATE TABLE IF NOT EXISTS file_bookmarks (
 );
 
 CREATE INDEX IF NOT EXISTS idx_file_bookmarks_file ON file_bookmarks(file_id);
+"#;
+
+// Multi-issue files (omnibus CBZ/CBR/PDF).
+//
+// The original schema tied one issue to one file with `file_id TEXT UNIQUE`.
+// A single large archive can legitimately hold many chapters, so v10 rebuilds
+// `issues` without that UNIQUE constraint and adds `page_offset` / `page_count`
+// to carve the file into per-issue segments. NULL `page_count` means "to the end
+// of the file", which is how every pre-v10 row stays valid.
+//
+// The table is rebuilt rather than ALTERed because SQLite cannot drop a UNIQUE
+// constraint in place. Foreign keys are switched off for the rebuild (they
+// cannot be changed inside a transaction) and the child tables keep referencing
+// `issues` by name, so they bind to the replacement table after the rename.
+const MIGRATION_10: &str = r#"
+PRAGMA foreign_keys = OFF;
+
+-- Triggers that reference `issues` but live on other tables outlive a DROP
+-- TABLE issues, so they are removed up front and recreated afterwards.
+DROP TRIGGER IF EXISTS series_fts_au;
+DROP TRIGGER IF EXISTS bookmark_fts_ai;
+DROP TRIGGER IF EXISTS bookmark_fts_ad;
+DROP TRIGGER IF EXISTS bookmark_fts_au;
+DROP TRIGGER IF EXISTS issue_fts_ai;
+DROP TRIGGER IF EXISTS issue_fts_ad;
+DROP TRIGGER IF EXISTS issue_fts_au;
+
+CREATE TABLE issues_v10 (
+    id TEXT PRIMARY KEY,
+    file_id TEXT REFERENCES library_files(id) ON DELETE SET NULL,
+    series_id TEXT REFERENCES series(id) ON DELETE SET NULL,
+    title TEXT NOT NULL,
+    number TEXT NOT NULL DEFAULT '',
+    sort_number REAL NOT NULL DEFAULT 0,
+    volume TEXT,
+    publisher TEXT,
+    universe TEXT,
+    release_date TEXT,
+    writer TEXT,
+    artist TEXT,
+    cover_artist TEXT,
+    description TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    variant_of TEXT REFERENCES issues(id) ON DELETE SET NULL,
+    edition TEXT,
+    metadata_locked INTEGER NOT NULL DEFAULT 0 CHECK (metadata_locked IN (0, 1)),
+    page_offset INTEGER NOT NULL DEFAULT 0,
+    page_count INTEGER
+);
+
+INSERT INTO issues_v10 (
+    id, file_id, series_id, title, number, sort_number, volume, publisher, universe,
+    release_date, writer, artist, cover_artist, description, created_at, updated_at,
+    variant_of, edition, metadata_locked, page_offset, page_count
+)
+SELECT
+    id, file_id, series_id, title, number, sort_number, volume, publisher, universe,
+    release_date, writer, artist, cover_artist, description, created_at, updated_at,
+    variant_of, edition, metadata_locked, 0, NULL
+FROM issues;
+
+DROP TABLE issues;
+ALTER TABLE issues_v10 RENAME TO issues;
+
+CREATE INDEX IF NOT EXISTS idx_issues_series ON issues(series_id, sort_number);
+CREATE INDEX IF NOT EXISTS idx_issues_variant ON issues(variant_of);
+CREATE INDEX IF NOT EXISTS idx_issues_file ON issues(file_id);
+
+CREATE TRIGGER IF NOT EXISTS issue_fts_ai AFTER INSERT ON issues BEGIN
+    INSERT INTO issue_fts (issue_id, title, series, number, creator, publisher, description, notes)
+    VALUES (
+        new.id,
+        coalesce(new.title, ''),
+        coalesce((SELECT title FROM series WHERE id = new.series_id), ''),
+        coalesce(new.number, ''),
+        trim(coalesce(new.writer, '') || ' ' || coalesce(new.artist, '') || ' ' || coalesce(new.cover_artist, '')),
+        coalesce(new.publisher, ''),
+        coalesce(new.description, ''),
+        ''
+    );
+END;
+
+CREATE TRIGGER IF NOT EXISTS issue_fts_ad AFTER DELETE ON issues BEGIN
+    DELETE FROM issue_fts WHERE issue_id = old.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS issue_fts_au AFTER UPDATE ON issues BEGIN
+    DELETE FROM issue_fts WHERE issue_id = old.id;
+    INSERT INTO issue_fts (issue_id, title, series, number, creator, publisher, description, notes)
+    VALUES (
+        new.id,
+        coalesce(new.title, ''),
+        coalesce((SELECT title FROM series WHERE id = new.series_id), ''),
+        coalesce(new.number, ''),
+        trim(coalesce(new.writer, '') || ' ' || coalesce(new.artist, '') || ' ' || coalesce(new.cover_artist, '')),
+        coalesce(new.publisher, ''),
+        coalesce(new.description, ''),
+        coalesce((SELECT group_concat(coalesce(label, '') || ' ' || coalesce(note, ''), ' ')
+                  FROM bookmarks WHERE issue_id = new.id), '')
+    );
+END;
+
+CREATE TRIGGER IF NOT EXISTS series_fts_au AFTER UPDATE OF title ON series BEGIN
+    DELETE FROM issue_fts WHERE issue_id IN (SELECT id FROM issues WHERE series_id = new.id);
+    INSERT INTO issue_fts (issue_id, title, series, number, creator, publisher, description, notes)
+    SELECT i.id, coalesce(i.title, ''), coalesce(new.title, ''), coalesce(i.number, ''),
+           trim(coalesce(i.writer, '') || ' ' || coalesce(i.artist, '') || ' ' || coalesce(i.cover_artist, '')),
+           coalesce(i.publisher, ''), coalesce(i.description, ''),
+           coalesce((SELECT group_concat(coalesce(label, '') || ' ' || coalesce(note, ''), ' ')
+                     FROM bookmarks WHERE issue_id = i.id), '')
+    FROM issues i WHERE i.series_id = new.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS bookmark_fts_ai AFTER INSERT ON bookmarks BEGIN
+    UPDATE issue_fts SET notes = (
+        SELECT group_concat(coalesce(label, '') || ' ' || coalesce(note, ''), ' ')
+        FROM bookmarks WHERE issue_id = new.issue_id
+    ) WHERE issue_id = new.issue_id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS bookmark_fts_ad AFTER DELETE ON bookmarks BEGIN
+    UPDATE issue_fts SET notes = coalesce((
+        SELECT group_concat(coalesce(label, '') || ' ' || coalesce(note, ''), ' ')
+        FROM bookmarks WHERE issue_id = old.issue_id
+    ), '') WHERE issue_id = old.issue_id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS bookmark_fts_au AFTER UPDATE OF label, note ON bookmarks BEGIN
+    UPDATE issue_fts SET notes = (
+        SELECT group_concat(coalesce(label, '') || ' ' || coalesce(note, ''), ' ')
+        FROM bookmarks WHERE issue_id = new.issue_id
+    ) WHERE issue_id = new.issue_id;
+END;
+
+PRAGMA foreign_keys = ON;
 "#;
 
 pub fn now() -> String {

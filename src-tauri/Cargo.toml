@@ -35,6 +35,9 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock", "s
 dunce = "1.0.5"
 unrar-rs = { version = "0.15.2", default-features = false, features = ["crypto-rust"] }
 flate2 = "1.1.11"
+ocrs = { version = "0.14", default-features = false, features = ["onnx"] }
+rten = { version = "0.28", features = ["onnx_format"] }
+rten-imageproc = "0.28"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

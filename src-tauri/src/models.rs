@@ -73,6 +73,9 @@ pub struct IssueCard {
     pub edition: Option<String>,
     pub variant_count: i64,
     pub metadata_locked: bool,
+    /// First page of this issue inside a shared archive file (multi-issue
+    /// files). Zero for ordinary one-issue-per-file rows.
+    pub page_offset: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -198,6 +201,55 @@ pub struct MatchFilePatch {
     pub artist: Option<String>,
     pub cover_artist: Option<String>,
     pub description: Option<String>,
+}
+
+/// One chapter row read from a contents page.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TocEntry {
+    pub title: String,
+    pub printed_page: i64,
+}
+
+/// A proposed issue split derived from a contents page, including the page
+/// range it would own. Shown to the user before anything is written.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SplitProposal {
+    pub file_id: String,
+    pub toc_page: i64,
+    pub page_count: i64,
+    pub offset: i64,
+    pub entries: Vec<SplitEntry>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SplitEntry {
+    pub title: String,
+    pub number: String,
+    pub printed_page: i64,
+    pub start_page: i64,
+    pub end_page: i64,
+}
+
+/// A confirmed split: replaces the file's current issue with one issue per
+/// range. Ranges are archive-absolute, half-open `[start, end)`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SplitRange {
+    pub title: String,
+    pub number: String,
+    pub start_page: i64,
+    pub end_page: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SplitRequest {
+    pub file_id: String,
+    pub series_title: Option<String>,
+    pub ranges: Vec<SplitRange>,
 }
 
 /// A file-scoped progress state for unmatched files. Mirrors `ProgressState`

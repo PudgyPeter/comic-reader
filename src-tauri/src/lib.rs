@@ -7,6 +7,7 @@ pub mod metadata;
 pub mod models;
 pub mod pdf;
 pub mod protocol;
+pub mod toc;
 pub mod repo;
 
 use std::sync::Arc;
@@ -28,10 +29,27 @@ pub fn run() {
             std::fs::create_dir_all(&data_dir)?;
             let cache_dir = data_dir.join("cache");
             std::fs::create_dir_all(&cache_dir)?;
+            // OCR models ship as bundled resources. The portable exe has no
+            // installer, so also accept `models/` next to the executable, and in
+            // dev fall back to the crate's own folder.
+            let models_dir = [
+                app.path()
+                    .resolve("models", tauri::path::BaseDirectory::Resource)
+                    .ok(),
+                std::env::current_exe()
+                    .ok()
+                    .and_then(|exe| exe.parent().map(|dir| dir.join("models"))),
+                Some(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("models")),
+            ]
+            .into_iter()
+            .flatten()
+            .find(|path| path.is_dir())
+            .unwrap_or_else(|| data_dir.join("models"));
             let database = Database::open(&data_dir)?;
             app.manage(AppState {
                 db: Arc::new(database),
                 cache_dir,
+                models_dir,
                 import_control: Arc::new(library::ImportControl::new()),
             });
             Ok(())
@@ -122,6 +140,10 @@ pub fn run() {
             commands::delete_file_bookmark,
             commands::set_file_spread_offset,
             commands::set_file_direction_override,
+            commands::propose_split,
+            commands::recombine_split,
+            commands::apply_split,
+            commands::split_available,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

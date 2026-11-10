@@ -9,6 +9,11 @@ use crate::library::{self, DISPLAY_FIELDS};
 use crate::metadata;
 use crate::models::*;
 
+/// Number of columns produced by `library::DISPLAY_FIELDS`. Queries that append
+/// extra columns after it (rank, snippet, keyset values) use this as their base
+/// offset, so it must be updated whenever a display field is added.
+pub const DISPLAY_FIELD_COUNT: usize = 27;
+
 pub fn issue_select() -> String {
     format!("SELECT {DISPLAY_FIELDS} FROM issues i \
              LEFT JOIN series s ON s.id = i.series_id \
@@ -637,6 +642,27 @@ pub fn issue_variants(conn: &Connection, issue_id: &str) -> AppResult<Vec<IssueC
     Ok(issues)
 }
 
+/// Slices an archive's page list to the range owned by one issue. Ordinary
+/// one-issue files have `page_offset = 0` and `page_count = NULL`, so they pass
+/// through untouched; a split omnibus keeps file-absolute indices so the
+/// `comic://` handler still resolves the right page.
+fn page_slice(all_pages: &[PageInfo], card: &IssueCard) -> Vec<PageInfo> {
+    let offset = card.page_offset.max(0);
+    if offset == 0 && card.page_count <= 0 {
+        return all_pages.to_vec();
+    }
+    let offset = offset as usize;
+    if offset >= all_pages.len() {
+        return Vec::new();
+    }
+    let take = if card.page_count > 0 {
+        card.page_count as usize
+    } else {
+        all_pages.len() - offset
+    };
+    all_pages[offset..(offset + take).min(all_pages.len())].to_vec()
+}
+
 pub fn reader_payload(conn: &Connection, issue_id: &str) -> AppResult<ReaderPayload> {
     let config = settings(conn)?;
     let card = issue(conn, issue_id)?;
@@ -661,7 +687,11 @@ pub fn reader_payload(conn: &Connection, issue_id: &str) -> AppResult<ReaderPayl
             height: row.get(3)?,
         })
     })?;
-    let pages = rows.collect::<Result<Vec<_>, _>>()?;
+    let all_pages = rows.collect::<Result<Vec<_>, _>>()?;
+    // Multi-issue files: this issue owns a slice of the archive. Page indices
+    // stay file-absolute (`comic://` serves by them) while the reader addresses
+    // pages 0..N for this issue, so remap them here.
+    let pages = page_slice(&all_pages, &card);
     if pages.is_empty() {
         let _ = format;
         let _ = path;
@@ -1504,7 +1534,8 @@ pub fn search_filtered(conn: &Connection, filter: &SearchFilter) -> AppResult<Se
     let mut stmt = conn.prepare(&sql)?;
     let mut rows: Vec<(IssueCard, f64, String, Vec<String>)> = Vec::new();
     let mapping = stmt.query_map(params_from_iter(values.iter()), |row| {
-        let base = 26usize;
+        // Rank/snippet/cursor columns follow the positional DISPLAY_FIELDS.
+        let base = DISPLAY_FIELD_COUNT;
         let card = library::map_issue_offset(row, 0)?;
         let rank: f64 = row.get(base)?;
         let snippet: String = row.get(base + 1)?;
@@ -3191,4 +3222,237 @@ pub fn file_reader_payload(conn: &Connection, file_id: &str) -> AppResult<Reader
         previous_issue_id: None,
         spread_offset,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Multi-issue files: contents-page OCR and splitting (schema v10)
+// ---------------------------------------------------------------------------
+
+/// Reads the file's page images for OCR through the normal on-demand path.
+fn load_page_bytes(
+    conn: &Connection,
+    file_id: &str,
+    index: usize,
+) -> AppResult<Vec<u8>> {
+    page_bytes(conn, file_id, index as i64).map(|(data, _)| data)
+}
+
+/// OCRs the front of a file and turns the contents page into proposed issue
+/// ranges. Nothing is written; the UI shows this and the user confirms.
+pub fn propose_split(
+    conn: &Connection,
+    file_id: &str,
+    models: Option<&crate::toc::OcrModels>,
+) -> AppResult<SplitProposal> {
+    let (page_count, existing): (i64, i64) = conn
+        .query_row(
+            "SELECT page_count, (SELECT count(*) FROM issues WHERE file_id = ?1)
+             FROM library_files WHERE id = ?1",
+            [file_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?
+        .ok_or_else(|| AppError::not_found("file"))?;
+    if existing > 1 {
+        return Err(AppError::invalid("file is already split into several issues"));
+    }
+    let (toc_page, entries) =
+        crate::toc::detect(|index| load_page_bytes(conn, file_id, index), page_count, models)?;
+    let offset = crate::toc::guess_offset(
+        entries.first().map(|entry| entry.printed_page).unwrap_or(1),
+        toc_page as i64,
+        page_count,
+    );
+    let ranges = crate::toc::ranges_from_entries(&entries, page_count, offset);
+    Ok(SplitProposal {
+        file_id: file_id.to_string(),
+        toc_page: toc_page as i64,
+        page_count,
+        offset,
+        entries: ranges
+            .into_iter()
+            .enumerate()
+            .map(|(index, (entry, start, end))| SplitEntry {
+                title: entry.title,
+                number: (index + 1).to_string(),
+                printed_page: entry.printed_page,
+                start_page: start,
+                end_page: end,
+            })
+            .collect(),
+    })
+}
+
+/// Recomputes ranges for a user-corrected offset without re-running OCR.
+pub fn recombine_split(
+    conn: &Connection,
+    file_id: &str,
+    entries: &[TocEntry],
+    offset: i64,
+) -> AppResult<SplitProposal> {
+    let page_count: i64 = conn
+        .query_row("SELECT page_count FROM library_files WHERE id = ?1", [file_id], |row| {
+            row.get(0)
+        })
+        .optional()?
+        .ok_or_else(|| AppError::not_found("file"))?;
+    let parsed: Vec<crate::toc::ParsedEntry> = entries
+        .iter()
+        .map(|entry| crate::toc::ParsedEntry {
+            title: entry.title.clone(),
+            printed_page: entry.printed_page,
+        })
+        .collect();
+    let ranges = crate::toc::ranges_from_entries(&parsed, page_count, offset);
+    Ok(SplitProposal {
+        file_id: file_id.to_string(),
+        toc_page: -1,
+        page_count,
+        offset,
+        entries: ranges
+            .into_iter()
+            .enumerate()
+            .map(|(index, (entry, start, end))| SplitEntry {
+                title: entry.title,
+                number: (index + 1).to_string(),
+                printed_page: entry.printed_page,
+                start_page: start,
+                end_page: end,
+            })
+            .collect(),
+    })
+}
+
+/// Applies a confirmed split: the file keeps its row, and each range becomes an
+/// issue carrying `page_offset` / `page_count`. Progress already recorded on the
+/// single pre-split issue is preserved on the range that contains it.
+pub fn apply_split(
+    conn: &mut Connection,
+    request: &SplitRequest,
+) -> AppResult<Vec<IssueCard>> {
+    if request.ranges.is_empty() {
+        return Err(AppError::invalid("a split needs at least one range"));
+    }
+    let (page_total, path): (i64, String) = conn
+        .query_row(
+            "SELECT page_count, path FROM library_files WHERE id = ?1",
+            [&request.file_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?
+        .ok_or_else(|| AppError::not_found("file"))?;
+
+    // Validate before mutating anything.
+    let mut previous_end = 0i64;
+    for range in &request.ranges {
+        if range.start_page < 0 || range.end_page > page_total {
+            return Err(AppError::invalid("split range is outside the file"));
+        }
+        if range.end_page <= range.start_page {
+            return Err(AppError::invalid("split range is empty"));
+        }
+        if range.start_page < previous_end {
+            return Err(AppError::invalid("split ranges overlap or are out of order"));
+        }
+        previous_end = range.end_page;
+    }
+
+    let existing: Option<(String, i64)> = conn
+        .query_row(
+            "SELECT id, coalesce(p.page, 0) FROM issues i
+             LEFT JOIN progress p ON p.issue_id = i.id
+             WHERE i.file_id = ?1",
+            [&request.file_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let file_stem = std::path::Path::new(&path)
+        .file_stem()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    let tx = conn.transaction()?;
+    let timestamp = now();
+    let series_title = request
+        .series_title
+        .as_deref()
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .unwrap_or(&file_stem)
+        .to_string();
+    let (series_id, _) = library::ensure_series(&tx, &series_title, None)?;
+
+    let mut issue_ids = Vec::new();
+    for range in &request.ranges {
+        let issue_id = new_id();
+        let sort_number = crate::metadata::parse_number(&range.number);
+        tx.execute(
+            "INSERT INTO issues
+                (id, file_id, series_id, title, number, sort_number, page_offset, page_count,
+                 created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
+            params![
+                issue_id,
+                request.file_id,
+                series_id,
+                if range.title.trim().is_empty() {
+                    format!("{series_title} #{}", range.number)
+                } else {
+                    range.title.clone()
+                },
+                range.number,
+                sort_number,
+                range.start_page,
+                range.end_page - range.start_page,
+                timestamp
+            ],
+        )?;
+        tx.execute(
+            "INSERT INTO progress (issue_id, page, total, status, updated_at)
+             VALUES (?1, 0, ?2, 'unread', ?3)",
+            params![issue_id, range.end_page - range.start_page, timestamp],
+        )?;
+        issue_ids.push((issue_id, range.start_page, range.end_page));
+    }
+
+    // Move the pre-split issue's progress to the range it falls inside, then
+    // retire the old issue. Reading position is remapped to the new slice.
+    if let Some((old_id, old_page)) = existing.clone() {
+        if let Some((new_id, start, _)) =
+            issue_ids.iter().find(|(_, start, end)| old_page >= *start && old_page < *end)
+        {
+            let rebased = old_page - start;
+            tx.execute(
+                "UPDATE progress SET
+                    page = ?2,
+                    total = (SELECT page_count FROM issues WHERE id = ?1),
+                    status = coalesce((SELECT status FROM progress WHERE issue_id = ?3), 'unread'),
+                    started_at = (SELECT started_at FROM progress WHERE issue_id = ?3),
+                    completed_at = (SELECT completed_at FROM progress WHERE issue_id = ?3),
+                    last_read_at = (SELECT last_read_at FROM progress WHERE issue_id = ?3)
+                 WHERE issue_id = ?1",
+                params![new_id, rebased, old_id],
+            )?;
+            // Bookmarks keep their meaning: move those inside this range onto
+            // the new issue and rebase their page numbers to the slice.
+            let new_end = issue_ids
+                .iter()
+                .find(|(id, _, _)| id == new_id)
+                .map(|(_, _, end)| *end)
+                .unwrap_or(*start);
+            tx.execute(
+                "UPDATE bookmarks SET issue_id = ?1, page = page - ?3
+                 WHERE issue_id = ?2 AND page >= ?3 AND page < ?4",
+                params![new_id, old_id, start, new_end],
+            )?;
+        }
+        tx.execute("DELETE FROM issues WHERE id = ?1", [&old_id])?;
+    }
+
+    tx.commit()?;
+    let mut out = Vec::new();
+    for (issue_id, _, _) in issue_ids {
+        out.push(issue(conn, &issue_id)?);
+    }
+    Ok(out)
 }

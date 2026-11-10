@@ -12,6 +12,7 @@ use crate::repo;
 pub struct AppState {
     pub db: Arc<Database>,
     pub cache_dir: PathBuf,
+    pub models_dir: PathBuf,
     pub import_control: Arc<library::ImportControl>,
 }
 
@@ -1102,6 +1103,54 @@ pub async fn set_file_direction_override(
     let db = state.db.clone();
     tauri::async_runtime::spawn_blocking(move || {
         db.with(|conn| repo::set_file_direction_override(conn, &file_id, direction.as_deref()))
+    })
+    .await
+    .map_err(|err| AppError::message(err.to_string()))?
+}
+
+#[tauri::command]
+pub async fn split_available(state: State<'_, AppState>) -> AppResult<bool> {
+    let models = crate::toc::OcrModels::new(&state.models_dir);
+    Ok(models.available())
+}
+
+#[tauri::command]
+pub async fn propose_split(
+    state: State<'_, AppState>,
+    file_id: String,
+) -> AppResult<SplitProposal> {
+    let db = state.db.clone();
+    let models = crate::toc::OcrModels::new(&state.models_dir);
+    tauri::async_runtime::spawn_blocking(move || {
+        db.with(|conn| repo::propose_split(conn, &file_id, Some(&models)))
+    })
+    .await
+    .map_err(|err| AppError::message(err.to_string()))?
+}
+
+#[tauri::command]
+pub async fn recombine_split(
+    state: State<'_, AppState>,
+    file_id: String,
+    entries: Vec<TocEntry>,
+    offset: i64,
+) -> AppResult<SplitProposal> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        db.with(|conn| repo::recombine_split(conn, &file_id, &entries, offset))
+    })
+    .await
+    .map_err(|err| AppError::message(err.to_string()))?
+}
+
+#[tauri::command]
+pub async fn apply_split(
+    state: State<'_, AppState>,
+    request: SplitRequest,
+) -> AppResult<Vec<IssueCard>> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        db.with(|conn| repo::apply_split(conn, &request))
     })
     .await
     .map_err(|err| AppError::message(err.to_string()))?

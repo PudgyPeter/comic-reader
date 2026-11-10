@@ -15,6 +15,9 @@ import type {
   IssuePatch,
   LibraryFilter,
   MatchFilePatch,
+  SplitProposal,
+  SplitRange,
+  TocEntry,
   LibraryRoot,
   LibrarySnapshot,
   NextIssue,
@@ -199,6 +202,14 @@ export const api = {
     command<number>("set_file_spread_offset", { fileId, offset }),
   setFileDirectionOverride: (fileId: string, direction: "ltr" | "rtl" | null) =>
     command<"ltr" | "rtl" | null>("set_file_direction_override", { fileId, direction }),
+  splitAvailable: () => command<boolean>("split_available"),
+  proposeSplit: (fileId: string) => command<SplitProposal>("propose_split", { fileId }),
+  recombineSplit: (fileId: string, entries: TocEntry[], offset: number) =>
+    command<SplitProposal>("recombine_split", { fileId, entries, offset }),
+  applySplit: (fileId: string, seriesTitle: string | undefined, ranges: SplitRange[]) =>
+    command<IssueCard[]>("apply_split", {
+      request: { fileId, seriesTitle, ranges },
+    }),
   bookmarks: (issueId: string) => command<Bookmark[]>("bookmarks", { issueId }),
   addBookmark: (issueId: string, page: number, label?: string, note?: string) =>
     command<Bookmark>("add_bookmark", { issueId, page, label, note }),

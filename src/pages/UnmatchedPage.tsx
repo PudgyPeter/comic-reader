@@ -7,17 +7,31 @@ import { cx, formatRelative, pluralize } from "../lib/utils";
 import { EmptyState, Modal, ProgressBar, Spinner, StatusBadge } from "../components/ui";
 import { Icon } from "../components/Icon";
 import { useToast } from "../components/Toast";
+import { SplitDialog } from "../components/SplitDialog";
 
 export default function UnmatchedPage() {
   const queryClient = useQueryClient();
   const toast = useToast();
   const [search, setSearch] = useState("");
   const [matching, setMatching] = useState<UnmatchedFile | null>(null);
+  const [splitting, setSplitting] = useState<UnmatchedFile | null>(null);
+
+  // OCR models ship with the app; when they are missing the Split action is
+  // hidden rather than failing after the user clicks it.
+  const splitAvailable = useQuery({
+    queryKey: ["split-available"],
+    queryFn: () => api.splitAvailable(),
+    staleTime: Infinity,
+    retry: false,
+  });
+  const canSplit = splitAvailable.data === true;
+
 
   const query = useQuery({
     queryKey: ["unmatched-files"],
     queryFn: () => api.unmatchedFiles(),
   });
+
 
   const files = (query.data ?? []).filter((file) =>
     [file.relativePath, file.suggestedSeries, file.suggestedTitle]
@@ -120,6 +134,17 @@ export default function UnmatchedPage() {
                           <Icon name="layers" className="size-3.5" />
                           Match
                         </button>
+                        {canSplit && (
+                          <button
+                            className="btn btn-sm"
+                            onClick={() => setSplitting(file)}
+                            disabled={file.status !== "present"}
+                            title="Split this archive into issues using its contents page"
+                          >
+                            <Icon name="list" className="size-3.5" />
+                            Split
+                          </button>
+                        )}
                       </div>
                     </td>
                   </tr>
@@ -135,6 +160,17 @@ export default function UnmatchedPage() {
           {pluralize(files.length, "file")} unmatched · {pluralize(files.reduce((sum, file) => sum + file.pageCount, 0), "page")}
         </p>
       )}
+
+      <SplitDialog
+        file={splitting}
+        onClose={() => setSplitting(null)}
+        onSplit={async (issues) => {
+          setSplitting(null);
+          await queryClient.invalidateQueries({ queryKey: ["unmatched-files"] });
+          await queryClient.invalidateQueries({ queryKey: ["library"] });
+          toast.push(`Split into ${pluralize(issues.length, "issue")}`, "success");
+        }}
+      />
 
       <MatchFileDialog
         file={matching}

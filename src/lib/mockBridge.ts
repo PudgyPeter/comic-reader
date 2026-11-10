@@ -609,6 +609,65 @@ const handlers: Record<string, (args: Json) => unknown> = {
     }
     throw new Error("Bookmark not found");
   },
+  split_available: () => true,
+  propose_split: (args) => {
+    if (!mockFile || mockFile.id !== args.fileId) throw new Error("File not found");
+    const total = Number(mockFile.pageCount);
+    const step = Math.max(1, Math.floor(total / 4));
+    const titles = ["Fallout", "The Chase", "Metal Virus", "Out of the Blue"];
+    const entries = titles.map((title, index) => ({
+      title: `Chapter ${index + 1} — ${title}`,
+      number: String(index + 1),
+      printedPage: index * step + 1,
+      startPage: index * step,
+      endPage: index === titles.length - 1 ? total : (index + 1) * step,
+    }));
+    return {
+      fileId: mockFile.id,
+      tocPage: 4,
+      pageCount: total,
+      offset: 0,
+      entries,
+    };
+  },
+  recombine_split: (args) => {
+    if (!mockFile) throw new Error("No file");
+    const total = Number(mockFile.pageCount);
+    const step = Math.max(1, Math.floor(total / 4));
+    return {
+      fileId: args.fileId,
+      tocPage: 4,
+      pageCount: total,
+      offset: args.offset,
+      entries: (args.entries as Json[]).map((entry, index) => ({
+        ...entry,
+        number: String(index + 1),
+        startPage: index * step,
+        endPage: index === args.entries.length - 1 ? total : (index + 1) * step,
+      })),
+    };
+  },
+  apply_split: (args) => {
+    const ranges = args.request?.ranges ?? [];
+    return (ranges as Json[]).map((range, index) => ({
+      id: `split-${Date.now()}-${index}`,
+      seriesId: null,
+      seriesTitle: args.request?.seriesTitle ?? null,
+      title: range.title,
+      number: range.number,
+      sortNumber: index + 1,
+      pageCount: range.endPage - range.startPage,
+      pageOffset: range.startPage,
+      fileId: mockFile?.id ?? null,
+      filePath: mockFile?.path ?? null,
+      status: "unread",
+      lastPage: 0,
+      metadataLocked: false,
+      variantCount: 0,
+      missing: false,
+      spoilerProtected: false,
+    }));
+  },
   unmatched_files: () => {
     if (!mockFile) return [];
     const progress = state.fileProgress[String(mockFile.id)];

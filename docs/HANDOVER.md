@@ -5,7 +5,7 @@ is the spec; this file is only state.
 
 ## Verified green
 
-- `cd src-tauri && cargo test` -> 40 passed (`tests/core.rs`)
+- `cd src-tauri && cargo test` -> 44 passed, 1 ignored (`tests/core.rs`)
 - Test library generator: `cargo run --example sonic_fixture -- <library-dir> <db-dir>`
   writes 26 synthetic CBZ issues (gaps at 7/12/15, one annual, one Cover B variant,
   a companion run with one gap), imports them, and seeds progress, a bookmark,
@@ -20,7 +20,7 @@ is the spec; this file is only state.
 
 ## Implemented
 
-Backend (`src-tauri/src`): `db` (schema **v9**, migrations, backup), `library` (CBZ/ZIP/CBR/
+Backend (`src-tauri/src`): `db` (schema **v10**, migrations, backup), `library` (CBZ/ZIP/CBR/
 PDF/image-folder import, duplicates, rescan, cancellable + progress-reporting scans), `archive`,
 `pdf` (pure-Rust image-page extractor), `metadata`, `repo` (queries, progress, orders,
 collections, search incl. bookmark notes, stats, history, missing-issue detection, per-series/
@@ -106,6 +106,39 @@ series and duplicate numbering.
   collection filter.
 - **Caveat:** there is no SQL-level guard preventing a manual `collection_items` insert for a
   smart collection; only the repo/UI paths enforce it.
+
+## Omnibus splitting from the contents page (schema v10)
+
+- v10 removes the one-issue-per-file rule (`issues.file_id` was `UNIQUE`) and adds
+  `issues.page_offset` / `issues.page_count`. `page_count = NULL` means "to the end of the file",
+  so every pre-v10 row is unchanged. The table is rebuilt because SQLite cannot drop a UNIQUE
+  constraint; triggers that reference `issues` from other tables (`series_fts_au`,
+  `bookmark_fts_*`) are dropped and recreated around the rename.
+- `library::DISPLAY_FIELDS` gained `i.page_offset` as its **27th** column, and
+  `repo::DISPLAY_FIELD_COUNT = 27` is the base offset for queries that append rank/snippet
+  columns. Update both together.
+- `repo::reader_payload` slices pages to `[page_offset, page_offset + page_count)` via
+  `page_slice`. Page indices stay **file-absolute** so `comic://page/<file>/<index>` keeps
+  working; the reader addresses them 0..N per issue.
+- OCR: `src-tauri/src/toc.rs` runs `ocrs` (ONNX models in `src-tauri/models/`, bundled as a Tauri
+  resource and resolved through `AppState.models_dir`). Two ~12 MB models, loaded per request.
+  OCR text lines are regrouped into rows **geometrically** (overlapping vertical centres, joined
+  left to right) because title and page number usually land on separate OCR lines.
+- `toc::parse_contents` accepts "Chapter N — Title … page", "#21 … page", "1. Title page" and
+  rejects lines without a trailing number. `toc::ranges_from_entries` converts printed page
+  numbers to archive ranges with a single offset; `toc::guess_offset` seeds it from the TOC page.
+- Flow: `propose_split` OCRs at most the first 12 pages and stops at the first plausible
+  contents page (≈320 ms release, ≈80 s debug). `recombine_split` recomputes ranges when the
+  user corrects the offset. `apply_split` validates ranges (ordered, non-empty, inside the file),
+  creates one issue per range, and moves the pre-split issue's progress/bookmarks onto the range
+  that contains them, rebasing page numbers.
+- UI: `/unmatched` rows gain a **Split** action when `split_available` is true. `SplitDialog`
+  shows the OCR'd chapters, lets the user change the printed→archive offset and each range, then
+  commits. Nothing is written until the user confirms.
+- Tests: `toc_rows_are_parsed_from_noisy_ocr_lines`, `toc_parser_rejects_lines_without_a_page_number`,
+  `applying_a_split_creates_ranges_and_keeps_progress`,
+  `split_ranges_must_not_overlap_or_exceed_the_file`, plus ignored
+  `propose_split_reads_a_real_contents_page` (`cargo test -- --ignored`).
 
 ## Large single-file archives (omnibus CBZ/CBR/PDF)
 
@@ -304,7 +337,14 @@ compositing bug (same bytes render fine in Chrome), not an app defect.
   it is what kept multi-GB archives from importing. `page_bytes` is the only page-data entry.
 - A root may be a single archive file. Any code that does `strip_prefix(root)` or walks the root
   must handle `root.is_file()` (use `library::relative_to_root`).
-- `SCHEMA_VERSION` is 9; migration tests must drop `file_progress`/`file_bookmarks` when
+- Multi-issue files: never assume one issue per `issues.file_id`. Anything that maps a file to an
+  issue must respect `page_offset`/`page_count`; `page_slice` is the only page-windowing helper.
+- OCR models are ~12 MB of ONNX and **must** stay bundled (`src-tauri/models`, `bundle.resources`).
+  When they are missing `split_available` returns false and the UI hides Split instead of failing.
+- The OCR layer is Windows-not-required (pure Rust `ocrs`/`rten`), so the cross-build works from
+  Linux. It does add ~40 GB of debug artifacts during a full `cargo test`; clean with
+  `cargo clean --profile dev` if the disk fills.
+- `SCHEMA_VERSION` is 10; migration tests must drop `file_progress`/`file_bookmarks` when
   simulating pre-v9 databases, and the v4 migration test already does.
 
 ## Windows executable

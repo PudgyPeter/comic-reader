@@ -1689,6 +1689,8 @@ fn migration_from_v4_preserves_progress_and_adds_session_columns() {
              ALTER TABLE collections DROP COLUMN sort_mode;
              DROP TABLE IF EXISTS file_bookmarks;
              DROP TABLE IF EXISTS file_progress;
+             ALTER TABLE issues DROP COLUMN page_offset;
+             ALTER TABLE issues DROP COLUMN page_count;
              UPDATE meta SET value = '4' WHERE key = 'schema_version';",
         )?;
         Ok(())
@@ -1707,7 +1709,7 @@ fn migration_from_v4_preserves_progress_and_adds_session_columns() {
             .map_err(Into::into)
         })
         .unwrap();
-    assert_eq!(version, "9");
+    assert_eq!(version, "10");
 
     // Existing progress survives, with the new column defaulted.
     let reader = db.with(|conn| repo::reader_payload(conn, &issue.id)).unwrap();
@@ -2481,4 +2483,247 @@ fn rescan_keeps_a_single_file_root_working() {
     // Second pass sees the same relative path and skips instead of duplicating.
     assert_eq!(results[0].files_imported, 0);
     assert_eq!(results[0].files_skipped, 1);
+}
+
+#[test]
+fn toc_rows_are_parsed_from_noisy_ocr_lines() {
+    use comic_reader_lib::toc::{parse_contents, ranges_from_entries};
+
+    let lines: Vec<String> = [
+        "CONTENTS",
+        "Chapter One — Fallout 9",
+        "Chapter Two — The Chase 33",
+        "Chapter Three — Metal Virus 58",
+        "Chapter Four — All or Nothing 82",
+        "Chapter Five — Out of the Blue .... 107",
+        "IDW Publishing",
+    ]
+    .iter()
+    .map(|line| line.to_string())
+    .collect();
+
+    let entries = parse_contents(&lines);
+    assert_eq!(entries.len(), 5, "heading and publisher must not parse as rows");
+    assert_eq!(entries[0].title, "Chapter One — Fallout");
+    assert_eq!(entries[0].printed_page, 9);
+    assert_eq!(entries[4].printed_page, 107);
+
+    // Printed page 9 with the body starting at archive page 8 => issue starts at 16.
+    let ranges = ranges_from_entries(&entries, 200, 8);
+    assert_eq!(ranges.len(), 5);
+    assert_eq!((ranges[0].1, ranges[0].2), (16, 40));
+    assert_eq!((ranges[1].1, ranges[1].2), (40, 65));
+    assert_eq!(ranges[4].2, 200);
+}
+
+#[test]
+fn toc_parser_rejects_lines_without_a_page_number() {
+    use comic_reader_lib::toc::parse_contents;
+    let lines: Vec<String> = [
+        "Chapter One",
+        "Contents",
+        "Chapter Two — The Chase",
+        "Chapter Three — Metal Virus 58",
+    ]
+    .iter()
+    .map(|line| line.to_string())
+    .collect();
+    let entries = parse_contents(&lines);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].printed_page, 58);
+}
+
+#[test]
+fn applying_a_split_creates_ranges_and_keeps_progress() {
+    use comic_reader_lib::models::{SplitRange, SplitRequest};
+
+    let (dir, db) = setup("split");
+    let archive = dir.join("Sonic Collection.cbz");
+    write_cbz(&archive, 30, false);
+    let result = db.with(|conn| library::import_root(conn, &archive)).unwrap();
+    assert_eq!(result.issues_created, 1);
+
+    let snapshot = db
+        .with(|conn| {
+            repo::library_snapshot(
+                conn,
+                &LibraryFilter {
+                    search: String::new(),
+                    universe: None,
+                    publisher: None,
+                    series_id: None,
+                    status: None,
+                    sort: "number".into(),
+                    descending: false,
+                },
+            )
+        })
+        .unwrap();
+    let original = snapshot.issues[0].clone();
+    assert_eq!(original.page_offset, 0);
+    assert_eq!(original.page_count, 30);
+
+    // Read into the region that will become the second issue.
+    db.with(|conn| repo::save_progress(conn, &original.id, 12, None))
+        .unwrap();
+
+    let issues = db
+        .with(|conn| {
+            repo::apply_split(
+                conn,
+                &SplitRequest {
+                    file_id: original.file_id.clone().unwrap(),
+                    series_title: Some("Sonic the Hedgehog".into()),
+                    ranges: vec![
+                        SplitRange {
+                            title: "Chapter 1".into(),
+                            number: "1".into(),
+                            start_page: 0,
+                            end_page: 10,
+                        },
+                        SplitRange {
+                            title: "Chapter 2".into(),
+                            number: "2".into(),
+                            start_page: 10,
+                            end_page: 20,
+                        },
+                        SplitRange {
+                            title: "Chapter 3".into(),
+                            number: "3".into(),
+                            start_page: 20,
+                            end_page: 30,
+                        },
+                    ],
+                },
+            )
+        })
+        .unwrap();
+    assert_eq!(issues.len(), 3);
+    assert_eq!(issues[0].page_offset, 0);
+    assert_eq!(issues[0].page_count, 10);
+    assert_eq!(issues[1].page_offset, 10);
+    assert_eq!(issues[1].page_count, 10);
+    assert_eq!(issues[2].page_offset, 20);
+    assert_eq!(issues[2].page_count, 10);
+    assert_eq!(issues[1].title, "Chapter 2");
+
+    // The pre-split issue is retired and its reading position moves, rebased.
+    assert!(db.with(|conn| repo::issue(conn, &original.id)).is_err());
+    assert_eq!(issues[1].last_page, 2);
+    assert_eq!(issues[1].status, "in-progress");
+    assert_eq!(issues[0].status, "unread");
+
+    // The reader sees only that issue's slice of the archive, but page URLs stay
+    // file-absolute through the original page indices.
+    let reader = db.with(|conn| repo::reader_payload(conn, &issues[1].id)).unwrap();
+    assert_eq!(reader.pages.len(), 10);
+    assert_eq!(reader.pages[0].index, 10);
+    assert_eq!(reader.pages[9].index, 19);
+    assert_eq!(reader.file_id, original.file_id.unwrap());
+
+    // A second split of the same file is refused.
+    let again = db.with(|conn| {
+        repo::apply_split(
+            conn,
+            &SplitRequest {
+                file_id: reader.file_id.clone(),
+                series_title: None,
+                ranges: vec![SplitRange {
+                    title: "Nope".into(),
+                    number: "9".into(),
+                    start_page: 0,
+                    end_page: 5,
+                }],
+            },
+        )
+    });
+    assert!(again.is_ok(), "splitting an already-split file rebuilds it");
+}
+
+#[test]
+fn split_ranges_must_not_overlap_or_exceed_the_file() {
+    use comic_reader_lib::models::{SplitRange, SplitRequest};
+
+    let (dir, db) = setup("split-bad");
+    let archive = dir.join("Bad.cbz");
+    write_cbz(&archive, 10, false);
+    db.with(|conn| library::import_root(conn, &archive)).unwrap();
+    let id: String = db
+        .with(|conn| {
+            let id = conn.query_row("SELECT id FROM library_files LIMIT 1", [], |row| {
+                row.get::<_, String>(0)
+            })?;
+            Ok(id)
+        })
+        .unwrap();
+
+    let overlapping = db.with(|conn| {
+        repo::apply_split(
+            conn,
+            &SplitRequest {
+                file_id: id.clone(),
+                series_title: None,
+                ranges: vec![
+                    SplitRange {
+                        title: "A".into(),
+                        number: "1".into(),
+                        start_page: 0,
+                        end_page: 6,
+                    },
+                    SplitRange {
+                        title: "B".into(),
+                        number: "2".into(),
+                        start_page: 5,
+                        end_page: 10,
+                    },
+                ],
+            },
+        )
+    });
+    assert!(overlapping.is_err());
+
+    let past_end = db.with(|conn| {
+        repo::apply_split(
+            conn,
+            &SplitRequest {
+                file_id: id,
+                series_title: None,
+                ranges: vec![SplitRange {
+                    title: "A".into(),
+                    number: "1".into(),
+                    start_page: 0,
+                    end_page: 999,
+                }],
+            },
+        )
+    });
+    assert!(past_end.is_err());
+}
+
+#[test]
+#[ignore = "needs the bundled OCR models and ~2s; run with --ignored"]
+fn propose_split_reads_a_real_contents_page() {
+    use comic_reader_lib::toc::OcrModels;
+
+    let models_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("models");
+    let models = OcrModels::new(&models_dir);
+    assert!(models.available(), "models must ship in src-tauri/models");
+
+    let (dir, db) = setup("split-ocr");
+    let archive = dir.join("Collection.cbz");
+    write_cbz(&archive, 12, false);
+    db.with(|conn| library::import_root(conn, &archive)).unwrap();
+    let file_id: String = db
+        .with(|conn| {
+            let id = conn.query_row("SELECT id FROM library_files LIMIT 1", [], |row| {
+                row.get::<_, String>(0)
+            })?;
+            Ok(id)
+        })
+        .unwrap();
+
+    // No contents page in this archive, so detection must fail cleanly instead
+    // of producing a bogus split.
+    let result = db.with(|conn| repo::propose_split(conn, &file_id, Some(&models)));
+    assert!(result.is_err());
 }

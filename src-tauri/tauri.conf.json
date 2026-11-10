@@ -30,6 +30,9 @@
   },
   "bundle": {
     "active": true,
+    "resources": [
+      "models/*.onnx"
+    ],
     "targets": [
       "nsis",
       "msi",

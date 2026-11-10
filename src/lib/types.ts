@@ -59,6 +59,8 @@ export interface IssueCard {
   edition: string | null;
   variantCount: number;
   metadataLocked: boolean;
+  /** First page of this issue inside a shared archive (multi-issue files). */
+  pageOffset: number;
 }
 
 export interface LibraryTotals {
@@ -180,6 +182,34 @@ export interface MatchFilePatch {
   artist?: string;
   coverArtist?: string;
   description?: string;
+}
+
+export interface TocEntry {
+  title: string;
+  printedPage: number;
+}
+
+export interface SplitEntry {
+  title: string;
+  number: string;
+  printedPage: number;
+  startPage: number;
+  endPage: number;
+}
+
+export interface SplitProposal {
+  fileId: string;
+  tocPage: number;
+  pageCount: number;
+  offset: number;
+  entries: SplitEntry[];
+}
+
+export interface SplitRange {
+  title: string;
+  number: string;
+  startPage: number;
+  endPage: number;
 }
 
 export interface FileProgressState {
