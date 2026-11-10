@@ -22,8 +22,37 @@ CORE (Stage 1 / first-release definition) is implemented end to end:
 - Configurable keyboard shortcuts, help panel, command palette
 - Statistics dashboard and JSON metadata export
 
-Stage 2/3 items (panel detection, character/universe database, timeline, sync) are
+Characters are a first slice of the universe work: a series-scoped roster built from the
+`<Characters>` tag in each issue's ComicInfo.xml, with descriptions that state their source
+(the comics, the web, or you). It works offline; the web lookup is a per-click opt-in.
+
+Stage 2/3 items (panel detection, full character/universe database, timeline, sync) are
 explicitly out of scope for this release and remain follow-ups.
+
+## Download
+
+Windows builds are attached to [releases](https://github.com/PudgyPeter/comic-reader/releases).
+The current installer is always:
+
+```
+https://github.com/PudgyPeter/comic-reader/releases/latest/download/Panel-setup.exe
+```
+
+and the portable build is `Panel.exe` on the same release. Builds are unsigned, so Windows
+SmartScreen warns on first run.
+
+To cut a release, tag a version and push it:
+
+```bash
+git tag v0.1.1
+git push origin v0.1.1
+```
+
+``.github/workflows/release.yml` first runs typecheck, lint, Vitest, `cargo test` and clippy on
+Ubuntu, then builds on `windows-latest` with the native MSVC toolchain and attaches the
+installer plus the portable exe to a GitHub release with generated notes. The tag also sets
+the version, so `v0.1.1` produces `Panel_0.1.1_x64-setup.exe`. Run the workflow manually
+(`workflow_dispatch`) to verify the pipeline without publishing.
 
 ## Development
 

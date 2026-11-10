@@ -7,12 +7,21 @@
  * installs it when running under Vite dev *and* the URL asks for it.
  */
 
-import mockData from "../mock/data.json";
 import { setMockResolver } from "./api";
 
 type Json = Record<string, any>;
 
-const data = mockData as unknown as Json;
+// The fixture is generated and git-ignored, so it must not be a static import:
+// a clean clone has no `src/mock/data.json` and `tsc` would fail before the
+// first export. `import.meta.glob` resolves to `{}` when the file is absent,
+// which keeps typecheck/build green and lets the harness show an empty library.
+const fixtures = import.meta.glob<{ default: Json }>("../mock/data.json", { eager: true });
+const emptyFixture: Json = {
+  library: { issues: [], series: [], roots: [], totals: {} },
+  settings: {},
+  readers: {},
+};
+const data = (Object.values(fixtures)[0]?.default ?? emptyFixture) as Json;
 
 const store: Json = JSON.parse(JSON.stringify(data.library));
 const settings = JSON.parse(JSON.stringify(data.settings));
