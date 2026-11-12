@@ -27,6 +27,32 @@ pub struct SeriesSummary {
     pub metadata_locked: bool,
 }
 
+/// A universe is a grouping label shared by series and issues; schema v11 and
+/// earlier store it as free text, so a universe is derived, not its own table.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UniverseSummary {
+    pub name: String,
+    pub series_count: i64,
+    pub issue_count: i64,
+    pub read_count: i64,
+    pub character_count: i64,
+    pub publishers: Vec<String>,
+    pub cover_file_id: Option<String>,
+    pub cover_page: Option<i64>,
+    pub year_first: Option<String>,
+    pub year_last: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UniverseDetail {
+    #[serde(flatten)]
+    pub summary: UniverseSummary,
+    pub series: Vec<SeriesSummary>,
+    pub characters: Vec<CharacterCard>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SeriesDetail {
@@ -668,6 +694,7 @@ pub struct CharacterCard {
     pub source_url: Option<String>,
     pub appearance_count: i64,
     pub read_count: i64,
+    pub relationship_count: i64,
     pub description_updated_at: Option<String>,
 }
 
@@ -691,6 +718,53 @@ pub struct CharacterDetail {
     #[serde(flatten)]
     pub card: CharacterCard,
     pub appearances: Vec<CharacterAppearance>,
+    pub relationships: Vec<CharacterRelationship>,
+}
+
+/// One typed edge, resolved for the character whose page is open.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CharacterRelationship {
+    pub id: String,
+    /// The other end of the edge.
+    pub character_id: String,
+    pub name: String,
+    pub series_id: Option<String>,
+    pub series_title: Option<String>,
+    /// Stable type code, e.g. `parent_of`.
+    pub relationship_type: String,
+    /// `forward_label` or `reverse_label`, already resolved for this direction.
+    pub label: String,
+    pub status: String,
+    pub description: Option<String>,
+    pub is_symmetric: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelationshipType {
+    pub code: String,
+    pub forward_label: String,
+    pub reverse_label: String,
+    pub is_symmetric: bool,
+}
+
+/// New edge from the open character to `other_character_id`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelationshipInput {
+    pub other_character_id: String,
+    pub relationship_type: String,
+    pub status: Option<String>,
+    pub description: Option<String>,
+}
+
+/// Partial edit of an existing edge. `None` fields are left untouched.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelationshipPatch {
+    pub status: Option<String>,
+    pub description: Option<String>,
 }
 
 /// User edit of a character. `None` fields are left untouched.

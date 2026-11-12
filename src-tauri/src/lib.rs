@@ -9,6 +9,7 @@ pub mod models;
 pub mod pdf;
 pub mod protocol;
 pub mod toc;
+pub mod relationships;
 pub mod repo;
 pub mod web;
 
@@ -152,6 +153,13 @@ pub fn run() {
             commands::character_detail,
             commands::update_character,
             commands::delete_character,
+            commands::character_relationships,
+            commands::relationship_types,
+            commands::create_relationship,
+            commands::update_relationship,
+            commands::delete_relationship,
+            commands::universes,
+            commands::universe_detail,
             commands::lookup_character,
         ])
         .run(tauri::generate_context!())

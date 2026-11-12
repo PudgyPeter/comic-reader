@@ -1691,6 +1691,11 @@ fn migration_from_v4_preserves_progress_and_adds_session_columns() {
              DROP TABLE IF EXISTS file_progress;
              ALTER TABLE issues DROP COLUMN page_offset;
              ALTER TABLE issues DROP COLUMN page_count;
+             DROP TABLE IF EXISTS character_relationships;
+             DROP TABLE IF EXISTS relationship_types;
+             DROP TABLE IF EXISTS characters;
+             DROP TABLE IF EXISTS character_aliases;
+             DROP TABLE IF EXISTS character_appearances;
              UPDATE meta SET value = '4' WHERE key = 'schema_version';",
         )?;
         Ok(())
@@ -1709,7 +1714,7 @@ fn migration_from_v4_preserves_progress_and_adds_session_columns() {
             .map_err(Into::into)
         })
         .unwrap();
-    assert_eq!(version, "11");
+    assert_eq!(version, "12");
 
     // Existing progress survives, with the new column defaulted.
     let reader = db.with(|conn| repo::reader_payload(conn, &issue.id)).unwrap();
@@ -2942,23 +2947,25 @@ fn character_name_parsing_handles_tag_noise() {
 }
 
 #[test]
-fn migration_from_v4_test_knows_about_v11_tables() {
-    // Guards the v4→current path: MIGRATION_11 creates characters from scratch,
-    // so the previous test's drop-list has to stay in step with the schema.
-    let (dir, db) = setup("migrate-v11");
+fn migration_from_v4_test_knows_about_v12_tables() {
+    // Guards the v4→current path: MIGRATION_11 and MIGRATION_12 create the
+    // character tables from scratch, so the previous test's drop-list has to
+    // stay in step with the schema.
+    let (dir, db) = setup("migrate-v12");
     drop(db);
     let db = Database::open(&dir.join("db")).unwrap();
     let tables: Vec<String> = db
         .with(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT name FROM sqlite_master WHERE type = 'table'
-                 AND name IN ('characters', 'character_aliases', 'character_appearances')",
+                 AND name IN ('characters', 'character_aliases', 'character_appearances',
+                              'relationship_types', 'character_relationships')",
             )?;
             let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
             Ok(rows.collect::<Result<Vec<_>, rusqlite::Error>>()?)
         })
         .unwrap();
-    assert_eq!(tables.len(), 3);
+    assert_eq!(tables.len(), 5);
     let version: String = db
         .with(|conn| {
             conn.query_row(
@@ -2969,7 +2976,7 @@ fn migration_from_v4_test_knows_about_v11_tables() {
             .map_err(Into::into)
         })
         .unwrap();
-    assert_eq!(version, "11");
+    assert_eq!(version, "12");
 }
 
 #[test]
@@ -2980,4 +2987,249 @@ fn web_lookup_returns_a_bounded_summary() {
     assert_eq!(summary.source, "Wikipedia");
     assert!(summary.url.starts_with("https://"));
     assert!(summary.extract.chars().count() <= 1201);
+}
+
+#[test]
+fn symmetric_relationships_are_stored_once() {
+    use comic_reader_lib::models::RelationshipInput;
+    use comic_reader_lib::relationships;
+
+    let (dir, db) = setup("relationships-symmetric");
+    let library_dir = dir.join("library");
+    std::fs::create_dir_all(&library_dir).unwrap();
+    write_cbz_with_characters(&library_dir.join("Sonic 001.cbz"), "Sonic, Tails", "1");
+    db.with(|conn| library::import_root(conn, &library_dir)).unwrap();
+    let series_id = series_id_for(&db, "Archie Sonic");
+    let characters = db
+        .with(|conn| comic_reader_lib::characters::series_characters(conn, &series_id))
+        .unwrap();
+    let sonic = &characters.iter().find(|c| c.name == "Sonic").unwrap().id.clone();
+    let tails = &characters.iter().find(|c| c.name == "Tails").unwrap().id.clone();
+
+    // Create from one side, then from the other: a symmetric type must update
+    // the same row instead of creating a mirrored duplicate.
+    let first = db
+        .with(|conn| {
+            relationships::create(
+                conn,
+                sonic,
+                &RelationshipInput {
+                    other_character_id: tails.clone(),
+                    relationship_type: "friend_of".into(),
+                    status: Some("active".into()),
+                    description: Some("Since childhood.".into()),
+                },
+            )
+        })
+        .unwrap();
+    let second = db
+        .with(|conn| {
+            relationships::create(
+                conn,
+                tails,
+                &RelationshipInput {
+                    other_character_id: sonic.clone(),
+                    relationship_type: "friend_of".into(),
+                    status: Some("former".into()),
+                    description: None,
+                },
+            )
+        })
+        .unwrap();
+    assert_eq!(first.id, second.id, "symmetric edge must be stored once");
+
+    let count: i64 = db
+        .with(|conn| {
+            conn.query_row("SELECT count(*) FROM character_relationships", [], |row| row.get(0))
+                .map_err(Into::into)
+        })
+        .unwrap();
+    assert_eq!(count, 1);
+
+    // Both sides resolve the same edge, and one side reads the reverse label.
+    let sonic_edges = db
+        .with(|conn| relationships::for_character(conn, sonic))
+        .unwrap();
+    assert_eq!(sonic_edges.len(), 1);
+    assert_eq!(sonic_edges[0].label, "Friend of");
+    assert_eq!(sonic_edges[0].status, "former");
+    let tails_edges = db
+        .with(|conn| relationships::for_character(conn, tails))
+        .unwrap();
+    assert_eq!(tails_edges[0].character_id, *sonic);
+
+    let detail = db
+        .with(|conn| comic_reader_lib::characters::character_detail(conn, sonic))
+        .unwrap();
+    assert_eq!(detail.card.relationship_count, 1);
+    assert_eq!(detail.relationships.len(), 1);
+}
+
+#[test]
+fn directed_relationships_use_reverse_labels() {
+    use comic_reader_lib::models::RelationshipInput;
+    use comic_reader_lib::relationships;
+
+    let (dir, db) = setup("relationships-directed");
+    let library_dir = dir.join("library");
+    std::fs::create_dir_all(&library_dir).unwrap();
+    write_cbz_with_characters(&library_dir.join("Sonic 001.cbz"), "Sonic, Longclaw", "1");
+    db.with(|conn| library::import_root(conn, &library_dir)).unwrap();
+    let series_id = series_id_for(&db, "Archie Sonic");
+    let characters = db
+        .with(|conn| comic_reader_lib::characters::series_characters(conn, &series_id))
+        .unwrap();
+    let sonic = characters.iter().find(|c| c.name == "Sonic").unwrap().id.clone();
+    let longclaw = characters
+        .iter()
+        .find(|c| c.name == "Longclaw")
+        .unwrap()
+        .id
+        .clone();
+
+    let edge = db
+        .with(|conn| {
+            relationships::create(
+                conn,
+                &longclaw,
+                &RelationshipInput {
+                    other_character_id: sonic.clone(),
+                    relationship_type: "mentor_of".into(),
+                    status: None,
+                    description: None,
+                },
+            )
+        })
+        .unwrap();
+    assert_eq!(edge.label, "Mentor of");
+
+    let pupil = db
+        .with(|conn| relationships::for_character(conn, &sonic))
+        .unwrap();
+    assert_eq!(pupil.len(), 1);
+    assert_eq!(pupil[0].label, "Student of");
+    assert_eq!(pupil[0].name, "Longclaw");
+}
+
+#[test]
+fn relationship_validation_rejects_self_links_and_unknown_types() {
+    use comic_reader_lib::models::RelationshipInput;
+    use comic_reader_lib::relationships;
+
+    let (dir, db) = setup("relationships-invalid");
+    let library_dir = dir.join("library");
+    std::fs::create_dir_all(&library_dir).unwrap();
+    write_cbz_with_characters(&library_dir.join("Sonic 001.cbz"), "Sonic", "1");
+    db.with(|conn| library::import_root(conn, &library_dir)).unwrap();
+    let series_id = series_id_for(&db, "Archie Sonic");
+    let sonic = db
+        .with(|conn| comic_reader_lib::characters::series_characters(conn, &series_id))
+        .unwrap()[0]
+        .id
+        .clone();
+
+    let self_link = db.with(|conn| {
+        relationships::create(
+            conn,
+            &sonic,
+            &RelationshipInput {
+                other_character_id: sonic.clone(),
+                relationship_type: "friend_of".into(),
+                status: None,
+                description: None,
+            },
+        )
+    });
+    assert!(self_link.is_err());
+
+    let unknown_type = db.with(|conn| {
+        relationships::create(
+            conn,
+            &sonic,
+            &RelationshipInput {
+                other_character_id: "no-such-character".into(),
+                relationship_type: "not_a_type".into(),
+                status: None,
+                description: None,
+            },
+        )
+    });
+    assert!(unknown_type.is_err());
+}
+
+#[test]
+fn universes_group_series_and_characters_by_label() {
+    let (dir, db) = setup("universes");
+    let library_dir = dir.join("library");
+    std::fs::create_dir_all(&library_dir).unwrap();
+    write_cbz_with_characters(&library_dir.join("Sonic 001.cbz"), "Sonic, Tails", "1");
+    write_cbz_with_info(
+        &library_dir.join("Knuckles 001.cbz"),
+        3,
+        "Knuckles",
+        "1",
+        "Knuckles",
+    );
+    db.with(|conn| library::import_root(conn, &library_dir)).unwrap();
+
+    // Both series share a universe label; a third series has none.
+    db.with(|conn| Ok(conn.execute("UPDATE series SET universe = 'Sonic Prime'", [])?))
+        .unwrap();
+    db.with(|conn| {
+        conn.execute(
+            "INSERT INTO series (id, title, sort_title, created_at, updated_at, universe)
+             VALUES ('orphan', 'Loose Series', 'loose series', '2020-01-01', '2020-01-01', NULL)",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    let universes = db.with(|conn| repo::universe_summaries(conn)).unwrap();
+    assert_eq!(universes.len(), 1, "unnamed universes must not appear");
+    let universe = &universes[0];
+    assert_eq!(universe.name, "Sonic Prime");
+    assert_eq!(universe.series_count, 2);
+    assert_eq!(universe.issue_count, 2);
+    assert_eq!(universe.read_count, 0);
+    assert_eq!(universe.character_count, 2);
+    assert!(universe.cover_file_id.is_some());
+    assert!(universe.publishers.iter().any(|p| p == "IDW Publishing"));
+
+    let detail = db.with(|conn| repo::universe_detail(conn, "Sonic Prime")).unwrap();
+    assert_eq!(detail.series.len(), 2);
+    assert_eq!(detail.characters.len(), 2);
+    assert!(detail.characters.iter().any(|c| c.name == "Sonic"));
+
+    let missing = db.with(|conn| repo::universe_detail(conn, "No Such Universe"));
+    assert!(missing.is_err());
+}
+
+#[test]
+fn universe_read_count_uses_completed_issues() {
+    let (dir, db) = setup("universes-progress");
+    let library_dir = dir.join("library");
+    std::fs::create_dir_all(&library_dir).unwrap();
+    write_cbz_with_characters(&library_dir.join("Sonic 001.cbz"), "Sonic", "1");
+    write_cbz_with_characters(&library_dir.join("Sonic 002.cbz"), "Sonic", "2");
+    db.with(|conn| library::import_root(conn, &library_dir)).unwrap();
+    db.with(|conn| Ok(conn.execute("UPDATE series SET universe = 'Sonic Prime'", [])?))
+        .unwrap();
+    let issues = db
+        .with(|conn| repo::library_snapshot(conn, &LibraryFilter {
+            search: String::new(),
+            universe: None,
+            publisher: None,
+            series_id: None,
+            status: None,
+            sort: "number".into(),
+            descending: false,
+        }))
+        .unwrap()
+        .issues;
+    db.with(|conn| repo::set_status(conn, &issues[0].id, "completed"))
+        .unwrap();
+
+    let universes = db.with(|conn| repo::universe_summaries(conn)).unwrap();
+    assert_eq!(universes[0].read_count, 1);
 }

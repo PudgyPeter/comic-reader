@@ -904,8 +904,12 @@ protection reference characters.
 > `description_source` (`comic`/`web`/`manual`) plus `source_url`; `character_appearances` links
 > character to issue with a `source` (`comicinfo`/`manual`). There is no `assets`/portrait
 > column, no `appearance_type`, and no `is_death`/`is_return`/`is_first_appearance` yet.
-> `character_relationships` is still unimplemented. Cross-series identity is unresolved: the
-> same character in two series is two rows.
+> `character_relationships` **landed in schema v12** with a narrower shape than §10.3: TEXT
+> UUID ids, 11 seeded `relationship_types` with `forward_label`/`reverse_label`/`is_symmetric`,
+> `status` (`active`/`former`/`unknown`/`secret`) and a free-text `description`. `is_spoiler`,
+> `reveal_issue_id` and `source_id` are **not** implemented, so edge-level spoiler protection is
+> absent. Cross-series identity is unresolved: the same character in two series is two rows,
+> which also limits a link to characters inside one series.
 
 ### 10.1 Characters
 
@@ -1006,6 +1010,9 @@ CREATE TABLE character_relationships (
 
 CREATE INDEX ix_rel_a ON character_relationships(character_a_id);
 CREATE INDEX ix_rel_b ON character_relationships(character_b_id);
+
+-- As implemented (v12): TEXT ids, no uuid/is_spoiler/reveal_issue_id/source_id,
+-- CHECK (character_a_id <> character_b_id), UNIQUE (a, b, type).
 ```
 
 **No SQL-level direction check.** SQLite forbids subqueries in `CHECK` constraints, so a rule like

@@ -5,7 +5,7 @@ use rusqlite::Connection;
 
 use crate::error::{AppError, AppResult};
 
-pub const SCHEMA_VERSION: i64 = 11;
+pub const SCHEMA_VERSION: i64 = 12;
 
 pub struct Database {
     conn: Mutex<Connection>,
@@ -85,6 +85,9 @@ impl Database {
             }
             if version < 11 {
                 conn.execute_batch(MIGRATION_11)?;
+            }
+            if version < 12 {
+                conn.execute_batch(MIGRATION_12)?;
             }
             if version < SCHEMA_VERSION {
                 conn.execute(
@@ -611,6 +614,61 @@ CREATE TABLE IF NOT EXISTS character_appearances (
 
 CREATE INDEX IF NOT EXISTS idx_appearances_issue ON character_appearances(issue_id);
 CREATE INDEX IF NOT EXISTS idx_appearances_char ON character_appearances(character_id, issue_id);
+"#;
+
+// Character relationships (schema v12).
+//
+// `DATA_MODEL.md` §10.3 defines typed, directed edges with a reveal anchor.
+// The shape here follows it with two pragmatic differences:
+//
+//   * IDs are TEXT UUIDs, matching the rest of this database, not INTEGERs.
+//   * Direction is normalised in Rust (`characters::upsert_relationship`) rather
+//     than by a CHECK: SQLite forbids subqueries in CHECK constraints, so a
+//     "symmetric types store MIN as A" rule has to live in one repository
+//     function. There is a trigger-free test for it.
+//
+// Relationship types are seeded so every installation starts with the same
+// vocabulary; `code` is the stable identifier and the labels are what the UI
+// shows. Symmetric types (`is_symmetric = 1`) render one edge regardless of
+// which character the user opened.
+const MIGRATION_12: &str = r#"
+CREATE TABLE IF NOT EXISTS relationship_types (
+    id            INTEGER PRIMARY KEY,
+    code          TEXT NOT NULL UNIQUE,
+    forward_label TEXT NOT NULL,
+    reverse_label TEXT NOT NULL,
+    is_symmetric  INTEGER NOT NULL DEFAULT 0 CHECK (is_symmetric IN (0,1))
+);
+
+INSERT OR IGNORE INTO relationship_types (id, code, forward_label, reverse_label, is_symmetric) VALUES
+    (1, 'friend_of',      'Friend of',      'Friend of',     1),
+    (2, 'ally_of',        'Ally of',        'Ally of',       1),
+    (3, 'enemy_of',       'Enemy of',       'Enemy of',      1),
+    (4, 'rival_of',       'Rival of',       'Rival of',      1),
+    (5, 'family_of',      'Family of',      'Family of',     1),
+    (6, 'member_of',      'Member of',      'Member of',     1),
+    (7, 'romantic_with',  'Romantic with',  'Romantic with', 1),
+    (8, 'mentor_of',      'Mentor of',      'Student of',    0),
+    (9, 'parent_of',      'Parent of',      'Child of',      0),
+    (10, 'sibling_of',    'Sibling of',     'Sibling of',    1),
+    (11, 'teammate_of',   'Teammate of',    'Teammate of',   1);
+
+CREATE TABLE IF NOT EXISTS character_relationships (
+    id                   TEXT PRIMARY KEY,
+    character_a_id       TEXT NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+    character_b_id       TEXT NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+    relationship_type_id INTEGER NOT NULL REFERENCES relationship_types(id),
+    status               TEXT NOT NULL DEFAULT 'active'
+        CHECK (status IN ('active', 'former', 'unknown', 'secret')),
+    description          TEXT,
+    created_at           TEXT NOT NULL,
+    updated_at           TEXT NOT NULL,
+    CHECK (character_a_id <> character_b_id),
+    UNIQUE (character_a_id, character_b_id, relationship_type_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_relationships_a ON character_relationships(character_a_id);
+CREATE INDEX IF NOT EXISTS idx_relationships_b ON character_relationships(character_b_id);
 "#;
 
 pub fn now() -> String {

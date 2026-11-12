@@ -519,6 +519,7 @@ export interface CharacterCard {
   sourceUrl: string | null;
   appearanceCount: number;
   readCount: number;
+  relationshipCount: number;
   descriptionUpdatedAt: string | null;
 }
 
@@ -535,6 +536,57 @@ export interface CharacterAppearance {
 
 export interface CharacterDetail extends CharacterCard {
   appearances: CharacterAppearance[];
+  relationships: CharacterRelationship[];
+}
+
+export interface CharacterRelationship {
+  id: string;
+  characterId: string;
+  name: string;
+  seriesId: string | null;
+  seriesTitle: string | null;
+  relationshipType: string;
+  label: string;
+  status: "active" | "former" | "unknown" | "secret";
+  description: string | null;
+  isSymmetric: boolean;
+}
+
+export interface RelationshipType {
+  code: string;
+  forwardLabel: string;
+  reverseLabel: string;
+  isSymmetric: boolean;
+}
+
+export interface RelationshipInput {
+  otherCharacterId: string;
+  relationshipType: string;
+  status?: "active" | "former" | "unknown" | "secret";
+  description?: string;
+}
+
+export interface RelationshipPatch {
+  status?: "active" | "former" | "unknown" | "secret";
+  description?: string | null;
+}
+
+export interface UniverseSummary {
+  name: string;
+  seriesCount: number;
+  issueCount: number;
+  readCount: number;
+  characterCount: number;
+  publishers: string[];
+  coverFileId: string | null;
+  coverPage: number | null;
+  yearFirst: string | null;
+  yearLast: string | null;
+}
+
+export interface UniverseDetail extends UniverseSummary {
+  series: SeriesSummary[];
+  characters: CharacterCard[];
 }
 
 export interface CharacterPatch {

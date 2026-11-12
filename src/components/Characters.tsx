@@ -6,6 +6,7 @@ import type { CharacterCard } from "../lib/types";
 import { EmptyState, Modal, Spinner } from "../components/ui";
 import { Icon } from "../components/Icon";
 import { useToast } from "../components/Toast";
+import { RelationshipsPanel } from "../components/Relationships";
 import { cx, pluralize } from "../lib/utils";
 
 const SOURCE_LABEL: Record<CharacterCard["descriptionSource"], string> = {
@@ -17,9 +18,11 @@ const SOURCE_LABEL: Record<CharacterCard["descriptionSource"], string> = {
 export function CharacterDetailModal({
   characterId,
   onClose,
+  onOpenCharacter,
 }: {
   characterId: string | null;
   onClose: () => void;
+  onOpenCharacter?: (characterId: string) => void;
 }) {
   const queryClient = useQueryClient();
   const toast = useToast();
@@ -113,6 +116,8 @@ export function CharacterDetailModal({
             <span>{pluralize(detail.appearanceCount, "appearance")}</span>
             <span>·</span>
             <span>{detail.readCount} read</span>
+            <span>·</span>
+            <span>{pluralize(detail.relationships.length, "relationship")}</span>
             {detail.descriptionUpdatedAt && (
               <>
                 <span>·</span>
@@ -172,6 +177,12 @@ export function CharacterDetailModal({
               </ul>
             )}
           </div>
+
+          <RelationshipsPanel
+            characterId={detail.id}
+            relationships={detail.relationships}
+            onOpenCharacter={onOpenCharacter}
+          />
         </div>
       )}
     </Modal>
@@ -276,7 +287,11 @@ export function CharactersPanel({
         </div>
       )}
 
-      <CharacterDetailModal characterId={openId} onClose={() => setOpenId(null)} />
+      <CharacterDetailModal
+        characterId={openId}
+        onClose={() => setOpenId(null)}
+        onOpenCharacter={(id) => setOpenId(id)}
+      />
     </section>
   );
 }

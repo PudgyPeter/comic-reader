@@ -384,6 +384,133 @@ pub fn series_summaries(conn: &Connection) -> AppResult<Vec<SeriesSummary>> {
     Ok(series)
 }
 
+/// Universes are grouped from the free-text `series.universe` label, so this
+/// query never invents a universe and an empty label is simply not a universe.
+pub fn universe_summaries(conn: &Connection) -> AppResult<Vec<UniverseSummary>> {
+    // Membership follows the series label: an issue belongs to a universe when
+    // its series does. Filtering issues by their own (possibly stale) universe
+    // column would drop issues imported before the label was set.
+    let sql = "
+        SELECT s.universe,
+            count(DISTINCT s.id),
+            (SELECT count(*) FROM issues i JOIN series x ON x.id = i.series_id
+             WHERE x.universe = s.universe),
+            (SELECT count(*) FROM issues i JOIN series x ON x.id = i.series_id
+             JOIN progress p ON p.issue_id = i.id
+             WHERE x.universe = s.universe AND p.status = 'completed'),
+            (SELECT count(DISTINCT c.id) FROM characters c JOIN series x ON x.id = c.series_id
+             WHERE x.universe = s.universe),
+            (SELECT min(i.release_date) FROM issues i JOIN series x ON x.id = i.series_id
+             WHERE x.universe = s.universe),
+            (SELECT max(i.release_date) FROM issues i JOIN series x ON x.id = i.series_id
+             WHERE x.universe = s.universe)
+        FROM series s
+        WHERE s.universe IS NOT NULL AND trim(s.universe) <> ''
+        GROUP BY s.universe
+        ORDER BY s.universe COLLATE NOCASE";
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt.query_map([], |row| {
+        Ok(UniverseSummary {
+            name: row.get(0)?,
+            series_count: row.get(1)?,
+            issue_count: row.get(2)?,
+            read_count: row.get(3)?,
+            character_count: row.get(4)?,
+            publishers: Vec::new(),
+            cover_file_id: None,
+            cover_page: None,
+            year_first: row.get(5)?,
+            year_last: row.get(6)?,
+        })
+    })?;
+    let mut universes = rows.collect::<Result<Vec<_>, _>>()?;
+    for universe in universes.iter_mut() {
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT publisher FROM series
+             WHERE universe = ?1 AND publisher IS NOT NULL AND trim(publisher) <> ''
+             ORDER BY publisher COLLATE NOCASE",
+        )?;
+        universe.publishers = stmt
+            .query_map([&universe.name], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        // Cover: the first series in the universe that has one, falling back to
+        // its first issue's file. Computed here so the cover file and the page
+        // number always come from the same series row.
+        let cover: Option<(String, Option<i64>)> = conn
+            .query_row(
+                "SELECT coalesce(s.cover_file_id,
+                            (SELECT i.file_id FROM issues i
+                             WHERE i.series_id = s.id AND i.file_id IS NOT NULL
+                             ORDER BY i.sort_number LIMIT 1)),
+                        s.cover_page
+                 FROM series s
+                 WHERE s.universe = ?1
+                   AND coalesce(s.cover_file_id,
+                         (SELECT i.file_id FROM issues i
+                          WHERE i.series_id = s.id AND i.file_id IS NOT NULL
+                          ORDER BY i.sort_number LIMIT 1)) IS NOT NULL
+                 ORDER BY s.title COLLATE NOCASE
+                 LIMIT 1",
+                [&universe.name],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if let Some((file_id, page)) = cover {
+            universe.cover_file_id = Some(file_id);
+            universe.cover_page = page;
+        }
+    }
+    Ok(universes)
+}
+
+pub fn universe_detail(conn: &Connection, name: &str) -> AppResult<UniverseDetail> {
+    let summary = universe_summaries(conn)?
+        .into_iter()
+        .find(|universe| universe.name == name)
+        .ok_or_else(|| AppError::not_found("universe"))?;
+    let series = series_summaries(conn)?
+        .into_iter()
+        .filter(|entry| entry.universe.as_deref() == Some(name))
+        .collect::<Vec<_>>();
+    let mut stmt = conn.prepare(
+        "SELECT c.id, c.series_id, s.title, c.name, c.description, c.description_source,
+                c.source_url,
+                (SELECT count(*) FROM character_appearances a WHERE a.character_id = c.id),
+                (SELECT count(*) FROM character_appearances a JOIN issues i ON i.id = a.issue_id
+                 JOIN progress p ON p.issue_id = i.id
+                 WHERE a.character_id = c.id AND p.status = 'completed'),
+                (SELECT count(*) FROM character_relationships r
+                 WHERE r.character_a_id = c.id OR r.character_b_id = c.id),
+                c.description_updated_at
+         FROM characters c
+         JOIN series s ON s.id = c.series_id
+         WHERE s.universe = ?1
+         ORDER BY c.sort_name COLLATE NOCASE",
+    )?;
+    let characters = stmt
+        .query_map([name], |row| {
+            Ok(CharacterCard {
+                id: row.get(0)?,
+                series_id: row.get(1)?,
+                series_title: row.get(2)?,
+                name: row.get(3)?,
+                description: row.get(4)?,
+                description_source: row.get(5)?,
+                source_url: row.get(6)?,
+                appearance_count: row.get(7)?,
+                read_count: row.get(8)?,
+                relationship_count: row.get(9)?,
+                description_updated_at: row.get(10)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(UniverseDetail {
+        summary,
+        series,
+        characters,
+    })
+}
+
 pub fn series_detail(conn: &Connection, series_id: &str) -> AppResult<SeriesDetail> {
     let config = settings(conn)?;
     let summary = series_summaries(conn)?

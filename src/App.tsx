@@ -18,6 +18,8 @@ const HistoryPage = lazy(() => import("./pages/HistoryPage"));
 const SettingsPage = lazy(() => import("./pages/SettingsPage"));
 const UnmatchedPage = lazy(() => import("./pages/UnmatchedPage"));
 const CharactersPage = lazy(() => import("./pages/CharactersPage"));
+const UniversesPage = lazy(() => import("./pages/UniversesPage"));
+const UniverseDetailPage = lazy(() => import("./pages/UniverseDetailPage"));
 
 function Themed() {
   const settings = useSettings((state) => state.settings);
@@ -63,7 +65,9 @@ export default function App() {
             <Route path="series" element={<SeriesPage />} />
             <Route path="series/:seriesId" element={<SeriesDetailPage />} />
             <Route path="unmatched" element={<UnmatchedPage />} />
-          <Route path="characters" element={<CharactersPage />} />
+            <Route path="characters" element={<CharactersPage />} />
+            <Route path="universes" element={<UniversesPage />} />
+            <Route path="universes/:universeName" element={<UniverseDetailPage />} />
             <Route path="collections" element={<CollectionsPage />} />
             <Route path="collections/:collectionId" element={<CollectionDetailPage />} />
             <Route path="orders" element={<OrdersPage />} />

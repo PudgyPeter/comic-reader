@@ -85,6 +85,7 @@ export default function CharactersPage() {
                 <th className="px-4 py-2.5 font-medium">Character</th>
                 <th className="px-4 py-2.5 font-medium">Series</th>
                 <th className="px-4 py-2.5 font-medium">Description</th>
+                <th className="px-4 py-2.5 text-right font-medium">Relationships</th>
                 <th className="px-4 py-2.5 text-right font-medium">Appearances</th>
               </tr>
             </thead>
@@ -118,6 +119,9 @@ export default function CharactersPage() {
                     </span>
                   </td>
                   <td className="px-4 py-3 text-right tabular-nums text-muted">
+                    {character.relationshipCount}
+                  </td>
+                  <td className="px-4 py-3 text-right tabular-nums text-muted">
                     {pluralize(character.appearanceCount, "issue")}
                   </td>
                 </tr>
@@ -127,7 +131,11 @@ export default function CharactersPage() {
         </div>
       )}
 
-      <CharacterDetailModal characterId={openId} onClose={() => setOpenId(null)} />
+      <CharacterDetailModal
+        characterId={openId}
+        onClose={() => setOpenId(null)}
+        onOpenCharacter={(id) => setOpenId(id)}
+      />
     </div>
   );
 }

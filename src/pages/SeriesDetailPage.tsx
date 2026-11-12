@@ -145,7 +145,14 @@ export default function SeriesDetailPage() {
                 <span>{series.year}</span>
               </>
             )}
-            {series.universe && <span className="chip chip-accent">{series.universe}</span>}
+            {series.universe && (
+              <Link
+                to={`/universes/${encodeURIComponent(series.universe)}`}
+                className="chip chip-accent hover:border-[var(--accent)]"
+              >
+                {series.universe}
+              </Link>
+            )}
           </div>
           <div className="mt-4 max-w-md">
             <ProgressBar value={series.issueCount ? series.readCount / series.issueCount : 0} />

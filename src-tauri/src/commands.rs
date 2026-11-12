@@ -1243,6 +1243,93 @@ pub async fn delete_character(state: State<'_, AppState>, character_id: String) 
     .map_err(|err| AppError::message(err.to_string()))?
 }
 
+#[tauri::command]
+pub async fn character_relationships(
+    state: State<'_, AppState>,
+    character_id: String,
+) -> AppResult<Vec<CharacterRelationship>> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        db.with(|conn| crate::relationships::for_character(conn, &character_id))
+    })
+    .await
+    .map_err(|err| AppError::message(err.to_string()))?
+}
+
+#[tauri::command]
+pub async fn relationship_types(state: State<'_, AppState>) -> AppResult<Vec<RelationshipType>> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        db.with(|conn| crate::relationships::types(conn))
+    })
+    .await
+    .map_err(|err| AppError::message(err.to_string()))?
+}
+
+#[tauri::command]
+pub async fn create_relationship(
+    state: State<'_, AppState>,
+    character_id: String,
+    input: RelationshipInput,
+) -> AppResult<CharacterRelationship> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        db.with(|conn| crate::relationships::create(conn, &character_id, &input))
+    })
+    .await
+    .map_err(|err| AppError::message(err.to_string()))?
+}
+
+#[tauri::command]
+pub async fn update_relationship(
+    state: State<'_, AppState>,
+    relationship_id: String,
+    patch: RelationshipPatch,
+) -> AppResult<()> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        db.with(|conn| crate::relationships::update(conn, &relationship_id, &patch))
+    })
+    .await
+    .map_err(|err| AppError::message(err.to_string()))?
+}
+
+#[tauri::command]
+pub async fn delete_relationship(
+    state: State<'_, AppState>,
+    relationship_id: String,
+) -> AppResult<()> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        db.with(|conn| crate::relationships::delete(conn, &relationship_id))
+    })
+    .await
+    .map_err(|err| AppError::message(err.to_string()))?
+}
+
+#[tauri::command]
+pub async fn universes(state: State<'_, AppState>) -> AppResult<Vec<UniverseSummary>> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        db.with(|conn| repo::universe_summaries(conn))
+    })
+    .await
+    .map_err(|err| AppError::message(err.to_string()))?
+}
+
+#[tauri::command]
+pub async fn universe_detail(
+    state: State<'_, AppState>,
+    name: String,
+) -> AppResult<UniverseDetail> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        db.with(|conn| repo::universe_detail(conn, &name))
+    })
+    .await
+    .map_err(|err| AppError::message(err.to_string()))?
+}
+
 /// Looks up a public summary. Never cached automatically: the user decides
 /// whether to keep it, so a stale or wrong extract costs nothing.
 #[tauri::command]

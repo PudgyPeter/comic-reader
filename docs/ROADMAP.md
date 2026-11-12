@@ -3,9 +3,11 @@
 > **Status:** CORE (Stage 1) largely implemented — 51 of 95 deliverables done, 32 partial,
 > 12 not started (foundations F1–F10 plus CORE-1…CORE-14). Reading, library, series,
 > collections, orders, search (FTS5 with filters), stats, smart collections, unmatched-file
-> matching and omnibus splitting work offline. Metadata providers, per-profile spoilers, order
-> import/export/sections and root relocation are not started. Every deliverable is marked
-> inline; see [`HANDOVER.md`](./HANDOVER.md) for the live remaining-work list.
+> matching and omnibus splitting work offline. Universes group series into a shared page with
+> their characters, and characters can be linked with typed relationships (no graph view yet).
+> Metadata providers, per-profile spoilers, order import/export/sections and root relocation are
+> not started. Every deliverable is marked inline; see [`HANDOVER.md`](./HANDOVER.md) for the live
+> remaining-work list.
 > **Companion documents:** [`ARCHITECTURE.md`](./ARCHITECTURE.md), [`DATA_MODEL.md`](./DATA_MODEL.md).
 > **Scope:** A local-first desktop comic reader and library for Tauri 2, React, TypeScript, Rust,
 > and SQLite.
@@ -53,12 +55,12 @@ Deliverables are marked inline so this file stays the single source of truth:
 
 | Item | State |
 | --- | --- |
-| Tauri 2 shell | Implemented; 95 IPC commands, `comic://` asset protocol |
-| React UI | Library, Series, Reader, Unmatched, Collections, Orders, Search, History, Stats, Settings |
-| Rust modules | `db`, `library`, `archive`, `pdf`, `metadata`, `toc` (OCR), `characters`, `web` (Wikipedia lookup), `repo`, `protocol`, `commands`, `models` |
-| Database | Schema v11 (FTS5, metadata lock, smart collections, file-scoped progress, multi-issue files, series-scoped character roster) with versioned migrations and pre-migration backups |
+| Tauri 2 shell | Implemented; 102 IPC commands, `comic://` asset protocol |
+| React UI | Library, Series, Universes, Reader, Characters, Unmatched, Collections, Orders, Search, History, Stats, Settings |
+| Rust modules | `db`, `library`, `archive`, `pdf`, `metadata`, `toc` (OCR), `characters`, `relationships`, `web` (Wikipedia lookup), `repo`, `protocol`, `commands`, `models` |
+| Database | Schema v12 (FTS5, metadata lock, smart collections, file-scoped progress, multi-issue files, series-scoped character roster, typed character relationships) with versioned migrations and pre-migration backups |
 | Archive support | CBZ, ZIP, CBR, image PDF, image folders; single-file roots and multi-issue (split) files |
-| Tests / lint | 49 Rust integration tests (+2 behind `--ignored`: OCR split, live web lookup), 34 Vitest tests, clippy `-D warnings`, eslint. No CI pipeline, no Prettier/rustfmt config. |
+| Tests / lint | 54 Rust integration tests (+2 behind `--ignored`: OCR split, live web lookup), 34 Vitest tests, clippy `-D warnings`, eslint. No CI pipeline, no Prettier/rustfmt config. |
 | Security config | Tightened CSP, scoped capability set |
 | Docs | `ARCHITECTURE.md`, `DATA_MODEL.md`, `HANDOVER.md`, this file |
 
@@ -260,9 +262,11 @@ Deliverables:
 - [x] Series metadata editing with metadata lock (schema v7): lock checkbox, auto-lock on edit,
   lock-aware bulk edits, forced refresh.
 - [~] Publisher and universe values exist on series/issues: the library shelf filters by both,
-  series cards display them, and series create/edit accepts them. **There is no grouping UI** —
-  `SeriesPage` only has a text filter, and there is no franchise column, so neither publisher,
-  universe, nor franchise can group the series list.
+  series cards display them, and series create/edit accepts them. **Universe grouping is now a
+  page** (`/universes` → `/universes/:name`, `repo::universe_summaries`/`universe_detail`): each
+  universe lists its series, characters, publishers and progress. **Publisher and franchise still
+  cannot group the series list** — `SeriesPage` only has a text filter and there is no franchise
+  column.
 - [x] Variant handling as designed in `DATA_MODEL.md` (decision Q2): `variant_of`, variant count,
   cycle rejection, variant compare view in the reader.
 - [x] Unmatched files view with a "match to issue" flow (schema v9): `/unmatched` lists loose
@@ -480,18 +484,39 @@ appearances.
   flags. **Not built** — the v11 tables carry only name, description, aliases and issue links.
 - [ ] Cross-series identity. Characters are unique per `(series_id, name)`, so the same
   character in two runs is two rows. **No universe-wide merge exists**; a merge UI is the
-  prerequisite for relationships, timelines and arc tracking.
+  prerequisite for a real universe graph, timelines and arc tracking. (Typed links can be
+  recorded today between any two character rows — see LATER-4 — but duplicated identities make
+  them approximate.)
 
 **Depends on:** the v11 tables, which now exist. The remaining work is additive (portraits,
 alias UI, appearance types, cross-series merge), not a schema rewrite.
 **Hard parts:** identity (same character across reboots/universes), data volume, spoiler-safe
 appearance lists, and sourcing. Do not expect a complete character database from providers.
 
-### LATER-4 — Relationship maps  — `[ ] not started`
+### LATER-4 — Relationship maps  — `[~] typed edges done, no graph view`
 
 A graph of character relationships with types and directions.
 
-**Depends on:** `character_relationships`.
+- [x] Typed, directed edges (schema v12): `relationship_types` (11 seeded types with forward and
+  reverse labels) and `character_relationships` (status `active`/`former`/`unknown`/`secret`,
+  optional description). `relationships::create` normalises symmetric types so one edge is stored
+  once, self-links and unknown types are rejected, and each side reads the correct label
+  ("Mentor of" / "Student of"). Covered by `symmetric_relationships_are_stored_once`,
+  `directed_relationships_use_reverse_labels` and
+  `relationship_validation_rejects_self_links_and_unknown_types`.
+- [x] Editable rather than automatic: the character modal lists edges, adds a link from any other
+  recorded character, edits the status inline and deletes the edge. Nothing is inferred from the
+  `<Characters>` tag. (`RelationshipsPanel` in `src/components/Relationships.tsx`.)
+- [ ] Interactive node graph. **Not built** — links are a list in the character modal, with no
+  graph layout or navigation surface of its own.
+- [ ] Spoiler filtering. **Not built** — `reveal_issue_id` and `is_spoiler` from
+  `DATA_MODEL.md` §10.3 were not added, so a secret edge is visible as soon as it is recorded.
+- [ ] Filter connections by universe or reading progress. **Not built.**
+
+**Depends on:** `character_relationships` and cross-series identity. **Identity is still the
+blocker for a real universe graph:** characters are unique per `(series_id, name)`, so the picker
+can link two rows from different series, but they are different rows for the same person until
+the merge exists.
 **Hard parts:** graph layout at scale, spoiler-filtered subgraphs (hide edges revealed later),
 and representing changing relationships over time. A static graph over the whole run is
 misleading; consider relationship states per era/arc.
@@ -580,7 +605,7 @@ Phase 6   CORE-11 search + CORE-12 shortcuts               done (scopes + some f
 Phase 7   CORE-13 collections + CORE-10 reading orders     done (sections/import-export missing)
 Phase 8   CORE-14 spoiler protection across all surfaces   partial (global only, not every surface)
 Phase 9   Hardening                                        not started (a11y, diagnostics, packaging CI)
-Phase 10  LATER features                                   started: series character roster only
+Phase 10  LATER features                                   started: roster, typed relationship links
 ```
 
 Remaining CORE work, in dependency order: provider adapters + match proposals (CORE-9),
@@ -611,7 +636,7 @@ These are not features and must not be deferred to the end:
 | Performance | Budgets for cold start, library scroll, reader open, and memory; measure, do not guess | `[~]` Import scans metadata only (`archive::scan_*`), so memory is flat by construction, but **no measurement is recorded** in `HANDOVER.md`; no automated budgets |
 | Accessibility | Keyboard-first, focus rings, screen reader labels, reduced motion, sufficient contrast | `[~]` Keyboard + reduced motion done; sparse labels, no dialog focus trap |
 | Error UX | Missing file, corrupt archive, DB busy, permission denied each have a designed state | `[~]` Reader/import have states; DB-busy and permission-denied are generic errors |
-| Migrations | Every schema change has a migration, a backup step, and a test from the previous version | `[x]` v1→v11 with backup-before-migrate and a v4→current test |
+| Migrations | Every schema change has a migration, a backup step, and a test from the previous version | `[x]` v1→v12 with backup-before-migrate and a v4→current test |
 | Security | New inputs (archives, XML, provider HTML) get limits and tests before release | `[~]` Entry size caps, safe XML, CSP; no fuzzing of the new OCR/archive paths |
 | Diagnostics | Logs and a support bundle that do not leak paths or keys | `[ ]` Not started |
 | Packaging | Installers and code signing for each target; test on a clean machine | `[~]` Windows NSIS + portable exe built; unsigned, not smoke-tested on Windows |
@@ -633,7 +658,7 @@ These are not features and must not be deferred to the end:
 | CORE-11 | spoiler-filtered search, pagination stability | `[x]` covered |
 | CORE-13 | smart rule compilation (no injection), orphan cleanup | `[~]` injection covered; orphan cleanup N/A (FKs) |
 | CORE-14 | every surface that can leak a spoiler | `[~]` tests cover `library_snapshot`, `issue`, `order_detail` and `search_filtered`; **`series_detail`, `collection_detail`, `reading_history` and `issue_variants` call `apply_spoilers` but have no leak test** |
-| LATER | each feature needs its own accuracy and performance criteria before starting | `[~]` LATER-3 started: roster from `<Characters>` is tested (`import_records_characters_from_comic_info`, idempotency, spoiler filtering); portraits, alias UI, appearance types and cross-series merge are untested because they do not exist |
+| LATER | each feature needs its own accuracy and performance criteria before starting | `[~]` LATER-3/LATER-4 started: roster is tested (`import_records_characters_from_comic_info`, idempotency, spoiler filtering) and relationship edges are tested (symmetric dedupe, reverse labels, validation). Graph rendering, edge spoiler filtering and cross-series merge are untested because they do not exist |
 
 ---
 

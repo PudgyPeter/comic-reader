@@ -362,8 +362,38 @@ const mockCharacters: Json[] = (store.series as Json[]).slice(0, 6).map((series,
   sourceUrl: null,
   appearanceCount: (index + 1) * 3,
   readCount: index,
+  relationshipCount: index === 0 ? 2 : 1,
   descriptionUpdatedAt: null,
 }));
+
+const mockRelationshipTypes = [
+  { code: "friend_of", forwardLabel: "Friend of", reverseLabel: "Friend of", isSymmetric: true },
+  { code: "ally_of", forwardLabel: "Ally of", reverseLabel: "Ally of", isSymmetric: true },
+  { code: "enemy_of", forwardLabel: "Enemy of", reverseLabel: "Enemy of", isSymmetric: true },
+  { code: "mentor_of", forwardLabel: "Mentor of", reverseLabel: "Student of", isSymmetric: false },
+  { code: "parent_of", forwardLabel: "Parent of", reverseLabel: "Child of", isSymmetric: false },
+];
+
+const mockRelationships: Json[] = mockCharacters.length >= 3
+  ? [
+      {
+        id: "mock-rel-1",
+        a: mockCharacters[0].id,
+        b: mockCharacters[1].id,
+        type: "friend_of",
+        status: "active",
+        description: "Mock edge used to render the relationship list.",
+      },
+      {
+        id: "mock-rel-2",
+        a: mockCharacters[0].id,
+        b: mockCharacters[4]?.id ?? mockCharacters[2].id,
+        type: "enemy_of",
+        status: "active",
+        description: null,
+      },
+    ]
+  : [];
 
 const handlers: Record<string, (args: Json) => unknown> = {
   library: (args) => snapshot(args.filter),
@@ -405,7 +435,11 @@ const handlers: Record<string, (args: Json) => unknown> = {
   character_detail: (args) => {
     const card = mockCharacters.find((entry) => entry.id === args.characterId);
     if (!card) throw new Error("Character not found");
-    return { ...card, appearances: [] };
+    return {
+      ...card,
+      appearances: [],
+      relationships: handlers.character_relationships({ characterId: card.id }),
+    };
   },
   update_character: (args) => {
     const card = mockCharacters.find((entry) => entry.id === args.characterId);
@@ -415,6 +449,102 @@ const handlers: Record<string, (args: Json) => unknown> = {
     return card;
   },
   delete_character: () => null,
+  character_relationships: (args) => {
+    const rows = mockRelationships.filter(
+      (entry) => entry.a === args.characterId || entry.b === args.characterId,
+    );
+    const typesByCode = new Map(mockRelationshipTypes.map((t) => [t.code, t]));
+    return rows.map((entry) => {
+      const other = mockCharacters.find(
+        (c) => c.id === (entry.a === args.characterId ? entry.b : entry.a),
+      );
+      const type = typesByCode.get(entry.type)!;
+      const forward = entry.a === args.characterId;
+      return {
+        id: entry.id,
+        characterId: other?.id ?? "",
+        name: other?.name ?? "Unknown",
+        seriesId: other?.seriesId ?? null,
+        seriesTitle: other?.seriesTitle ?? null,
+        relationshipType: entry.type,
+        label: forward ? type.forwardLabel : type.reverseLabel,
+        status: entry.status,
+        description: entry.description ?? null,
+        isSymmetric: type.isSymmetric,
+      };
+    });
+  },
+  relationship_types: () => mockRelationshipTypes,
+  create_relationship: (args) => {
+    const id = `mock-rel-${Date.now()}`;
+    mockRelationships.push({
+      id,
+      a: args.characterId,
+      b: args.input.otherCharacterId,
+      type: args.input.relationshipType,
+      status: args.input.status ?? "active",
+      description: args.input.description ?? null,
+    });
+    const rows = handlers.character_relationships({ characterId: args.characterId }) as Json[];
+    return rows.find((row) => row.id === id);
+  },
+  update_relationship: (args) => {
+    const entry = mockRelationships.find((row) => row.id === args.relationshipId);
+    if (entry) {
+      entry.status = args.patch.status ?? entry.status;
+      entry.description = args.patch.description ?? entry.description;
+    }
+    return null;
+  },
+  delete_relationship: (args) => {
+    const index = mockRelationships.findIndex((row) => row.id === args.relationshipId);
+    if (index >= 0) mockRelationships.splice(index, 1);
+    return null;
+  },
+  universes: () => {
+    const groups = new Map<string, Json>();
+    for (const series of recomputeSeries()) {
+      if (!series.universe) continue;
+      const name = String(series.universe);
+      const group = groups.get(name) ?? {
+        name,
+        seriesCount: 0,
+        issueCount: 0,
+        readCount: 0,
+        characterCount: 0,
+        publishers: [],
+        coverFileId: null,
+        coverPage: null,
+        yearFirst: null,
+        yearLast: null,
+      };
+      if (!group.coverFileId && series.coverFileId) {
+        group.coverFileId = series.coverFileId;
+        group.coverPage = series.coverPage ?? 0;
+      }
+      if (series.publisher && !group.publishers.includes(series.publisher)) {
+        group.publishers.push(series.publisher);
+      }
+      group.seriesCount += 1;
+      group.issueCount += series.issueCount;
+      group.readCount += series.readCount;
+      group.characterCount += mockCharacters.filter((c) => c.seriesId === series.id).length;
+      groups.set(name, group);
+    }
+    return [...groups.values()];
+  },
+  universe_detail: (args) => {
+    const universes = handlers.universes({}) as Json[];
+    const summary = universes.find((entry) => entry.name === args.name);
+    if (!summary) throw new Error("Universe not found");
+    const series = recomputeSeries().filter((entry) => entry.universe === args.name);
+    const seriesIds = new Set(series.map((entry) => entry.id));
+    return {
+      ...summary,
+      series,
+      characters: mockCharacters.filter((entry) => seriesIds.has(entry.seriesId)),
+    };
+  },
   lookup_character: () => ({
     title: "Example",
     extract: "Mock summaries are not fetched from the web.",

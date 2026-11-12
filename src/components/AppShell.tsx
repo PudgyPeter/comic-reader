@@ -15,6 +15,7 @@ const NAV = [
   { to: "/series", label: "Series", icon: "layers" },
   { to: "/unmatched", label: "Unmatched", icon: "filter" },
   { to: "/characters", label: "Characters", icon: "book" },
+  { to: "/universes", label: "Universes", icon: "layers" },
   { to: "/collections", label: "Collections", icon: "bookmark" },
   { to: "/orders", label: "Reading orders", icon: "list" },
   { to: "/history", label: "History", icon: "clock" },

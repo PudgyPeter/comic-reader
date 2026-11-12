@@ -291,9 +291,18 @@ Verified: `cargo test` 34 passed, `npm test` 34 passed, `npm run typecheck`, `np
    run through `repo::apply_spoilers`; only the title is hidden past the frontier.
    Next: portraits, alias editing UI, `appearance_type`/`is_death` flags, and a cross-series
    merge (characters are unique per `(series_id, name)` today, so one character in two runs is
-   two rows — that merge is the prerequisite for relationships and arc tracking).
+   two rows — that merge is the prerequisite for a real universe graph and for arc tracking).
+- **Relationships (schema v12)**: `relationship_types` (11 seeded, forward/reverse labels,
+  symmetric flag) and `character_relationships` (status + description). Edges are created from
+  the character modal (`RelationshipsPanel`), symmetric types are stored once with the smaller
+  id first, and each side reads its own label. Not built: node graph, edge spoiler filtering
+  (`is_spoiler`/`reveal_issue_id`), universe/progress filters.
+- **Universes**: derived from the free-text `series.universe` label — `/universes` and
+  `/universes/:name` show the grouped series, characters, publishers and progress
+  (`repo::universe_summaries`, `repo::universe_detail`). There is no universe table and no
+  timeline; a rename is a series edit.
 
-Deferred by design (Stage 2/3): panel detection, relationships/locations/arcs/timeline,
+Deferred by design (Stage 2/3): panel detection, locations/arcs/timeline,
 appearance tracking, sync, recommendations, full comparison view.
 
 ## How to verify UI without a working webview

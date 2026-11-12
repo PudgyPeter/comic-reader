@@ -154,6 +154,8 @@ pub fn series_characters(conn: &Connection, series_id: &str) -> AppResult<Vec<Ch
                 (SELECT count(*) FROM character_appearances a JOIN issues i ON i.id = a.issue_id
                  JOIN progress p ON p.issue_id = i.id
                  WHERE a.character_id = c.id AND p.status = 'completed'),
+                (SELECT count(*) FROM character_relationships r
+                 WHERE r.character_a_id = c.id OR r.character_b_id = c.id),
                 c.description_updated_at
          FROM characters c LEFT JOIN series s ON s.id = c.series_id
          WHERE c.series_id = ?1
@@ -170,7 +172,8 @@ pub fn series_characters(conn: &Connection, series_id: &str) -> AppResult<Vec<Ch
             source_url: row.get(6)?,
             appearance_count: row.get(7)?,
             read_count: row.get(8)?,
-            description_updated_at: row.get(9)?,
+            relationship_count: row.get(9)?,
+            description_updated_at: row.get(10)?,
         })
     })?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -190,6 +193,8 @@ pub fn character_detail(conn: &Connection, character_id: &str) -> AppResult<Char
                     (SELECT count(*) FROM character_appearances a JOIN issues i ON i.id = a.issue_id
                      JOIN progress p ON p.issue_id = i.id
                      WHERE a.character_id = c.id AND p.status = 'completed'),
+                    (SELECT count(*) FROM character_relationships r
+                     WHERE r.character_a_id = c.id OR r.character_b_id = c.id),
                     c.description_updated_at
              FROM characters c LEFT JOIN series s ON s.id = c.series_id
              WHERE c.id = ?1",
@@ -205,7 +210,8 @@ pub fn character_detail(conn: &Connection, character_id: &str) -> AppResult<Char
                     source_url: row.get(6)?,
                     appearance_count: row.get(7)?,
                     read_count: row.get(8)?,
-                    description_updated_at: row.get(9)?,
+                    relationship_count: row.get(9)?,
+                    description_updated_at: row.get(10)?,
                 })
             },
         )
@@ -298,6 +304,7 @@ pub fn character_detail(conn: &Connection, character_id: &str) -> AppResult<Char
     Ok(CharacterDetail {
         card,
         appearances,
+        relationships: crate::relationships::for_character(conn, character_id)?,
     })
 }
 
@@ -474,6 +481,8 @@ pub fn all_characters(conn: &Connection) -> AppResult<Vec<CharacterCard>> {
                 (SELECT count(*) FROM character_appearances a JOIN issues i ON i.id = a.issue_id
                  JOIN progress p ON p.issue_id = i.id
                  WHERE a.character_id = c.id AND p.status = 'completed'),
+                (SELECT count(*) FROM character_relationships r
+                 WHERE r.character_a_id = c.id OR r.character_b_id = c.id),
                 c.description_updated_at
          FROM characters c LEFT JOIN series s ON s.id = c.series_id
          ORDER BY c.sort_name COLLATE NOCASE",
@@ -489,7 +498,8 @@ pub fn all_characters(conn: &Connection) -> AppResult<Vec<CharacterCard>> {
             source_url: row.get(6)?,
             appearance_count: row.get(7)?,
             read_count: row.get(8)?,
-            description_updated_at: row.get(9)?,
+            relationship_count: row.get(9)?,
+            description_updated_at: row.get(10)?,
         })
     })?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)

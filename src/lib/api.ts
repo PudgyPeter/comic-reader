@@ -22,6 +22,12 @@ import type {
   CharacterPatch,
   CharacterSummary,
   CharacterSync,
+  CharacterRelationship,
+  RelationshipInput,
+  RelationshipPatch,
+  RelationshipType,
+  UniverseDetail,
+  UniverseSummary,
   TocEntry,
   LibraryRoot,
   LibrarySnapshot,
@@ -218,6 +224,17 @@ export const api = {
     command<CharacterCard>("update_character", { characterId, patch }),
   deleteCharacter: (characterId: string) => command<void>("delete_character", { characterId }),
   lookupCharacter: (name: string) => command<CharacterSummary>("lookup_character", { name }),
+  characterRelationships: (characterId: string) =>
+    command<CharacterRelationship[]>("character_relationships", { characterId }),
+  relationshipTypes: () => command<RelationshipType[]>("relationship_types"),
+  createRelationship: (characterId: string, input: RelationshipInput) =>
+    command<CharacterRelationship>("create_relationship", { characterId, input }),
+  updateRelationship: (relationshipId: string, patch: RelationshipPatch) =>
+    command<void>("update_relationship", { relationshipId, patch }),
+  deleteRelationship: (relationshipId: string) =>
+    command<void>("delete_relationship", { relationshipId }),
+  universes: () => command<UniverseSummary[]>("universes"),
+  universeDetail: (name: string) => command<UniverseDetail>("universe_detail", { name }),
   splitAvailable: () => command<boolean>("split_available"),
   proposeSplit: (fileId: string) => command<SplitProposal>("propose_split", { fileId }),
   recombineSplit: (fileId: string, entries: TocEntry[], offset: number) =>
