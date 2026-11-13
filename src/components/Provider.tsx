@@ -103,6 +103,7 @@ export function ProviderSeriesPanel({
   const toast = useToast();
   const queryClient = useQueryClient();
   const [proposal, setProposal] = useState<import("../lib/types").ProviderProposal | null>(null);
+  const [edges, setEdges] = useState<import("../lib/types").ProposedEdge[] | null>(null);
 
   const lookup = useMutation({
     mutationFn: () => api.lookupSeriesProvider(seriesId),
@@ -114,6 +115,48 @@ export function ProviderSeriesPanel({
     onSuccess: async (result) => {
       setProposal(result);
       await queryClient.invalidateQueries({ queryKey: ["provider-status"] });
+    },
+    onError: (error: Error) => toast.push(error.message, "error"),
+  });
+
+  const enrich = useMutation({
+    mutationFn: () => api.enrichSeriesCharacters(seriesId),
+    onSuccess: async (count) => {
+      await queryClient.invalidateQueries({ queryKey: ["characters", seriesId] });
+      toast.push(`Added bios to ${count} characters`, "info");
+      onApplied?.();
+    },
+    onError: (error: Error) => toast.push(error.message, "error"),
+  });
+
+  const proposeRelationships = useMutation({
+    mutationFn: () => api.proposeSeriesRelationships(seriesId),
+    onSuccess: async (found) => {
+      setEdges(found);
+      await queryClient.invalidateQueries({ queryKey: ["provider-status"] });
+    },
+    onError: (error: Error) => toast.push(error.message, "error"),
+  });
+
+  const decideEdges = useMutation({
+    mutationFn: async ({ accept }: { accept: boolean }) => {
+      const pending = await api.providerProposals();
+      const row = pending.find(
+        (entry) => entry.entity === "series" && entry.localId === seriesId,
+      );
+      if (!row) throw new Error("no pending relationship proposal");
+      return api.decideProviderProposal(row.id, accept);
+    },
+    onSuccess: async (applied, { accept }) => {
+      setEdges(null);
+      await queryClient.invalidateQueries({ queryKey: ["provider-status"] });
+      await queryClient.invalidateQueries({ queryKey: ["character"] });
+      await queryClient.invalidateQueries({ queryKey: ["characters"] });
+      toast.push(
+        accept ? `Linked ${applied} relationships` : "Relationship proposal rejected",
+        "info",
+      );
+      onApplied?.();
     },
     onError: (error: Error) => toast.push(error.message, "error"),
   });
@@ -172,13 +215,68 @@ export function ProviderSeriesPanel({
       )}
 
       {found && !proposal && (
-        <button
-          className="btn btn-ghost btn-sm"
-          onClick={() => propose.mutate()}
-          disabled={propose.isPending}
-        >
-          {propose.isPending ? "Fetching credits…" : "Propose characters from issues"}
-        </button>
+        <div className="flex flex-wrap gap-2">
+          <button
+            className="btn btn-ghost btn-sm"
+            onClick={() => propose.mutate()}
+            disabled={propose.isPending}
+          >
+            {propose.isPending ? "Fetching credits…" : "Propose characters from issues"}
+          </button>
+          <button
+            className="btn btn-ghost btn-sm"
+            onClick={() => enrich.mutate()}
+            disabled={enrich.isPending}
+            title="One-line bios and aliases for characters already linked"
+          >
+            {enrich.isPending ? "Fetching bios…" : "Fetch bios & aliases"}
+          </button>
+          <button
+            className="btn btn-ghost btn-sm"
+            onClick={() => proposeRelationships.mutate()}
+            disabled={proposeRelationships.isPending}
+            title="Edges are filtered to characters already in the library"
+          >
+            {proposeRelationships.isPending ? "Building graph…" : "Propose relationships"}
+          </button>
+        </div>
+      )}
+
+      {edges && (
+        <div className="max-h-64 overflow-y-auto rounded-lg border border-[var(--accent)]/40 bg-[var(--surface-2)] p-2.5">
+          <p className="text-[11px] text-muted">
+            {edges.length} edges between characters in this library. Provider lists span
+            every continuity; anything outside your library is dropped.
+          </p>
+          <ul className="mt-1.5 space-y-0.5">
+            {edges.slice(0, 40).map((edge, index) => (
+              <li key={`${edge.characterId}-${edge.otherId}-${index}`} className="text-[11px]">
+                <span className="font-medium">{edge.characterName}</span>
+                <span className="text-muted"> — {edge.relationshipType.replace(/_/g, " ")} — </span>
+                <span className="font-medium">{edge.otherName}</span>
+              </li>
+            ))}
+          </ul>
+          {edges.length > 40 && (
+            <p className="mt-1 text-[10px] text-muted">…and {edges.length - 40} more</p>
+          )}
+          <div className="mt-2 flex justify-end gap-2">
+            <button
+              className="btn btn-ghost btn-sm"
+              onClick={() => decideEdges.mutate({ accept: false })}
+              disabled={decideEdges.isPending}
+            >
+              Reject
+            </button>
+            <button
+              className="btn btn-primary btn-sm"
+              onClick={() => decideEdges.mutate({ accept: true })}
+              disabled={decideEdges.isPending || edges.length === 0}
+            >
+              Accept {edges.length}
+            </button>
+          </div>
+        </div>
       )}
 
       {proposal && (

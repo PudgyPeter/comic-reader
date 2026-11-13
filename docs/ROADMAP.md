@@ -60,7 +60,7 @@ Deliverables are marked inline so this file stays the single source of truth:
 | Rust modules | `db`, `library`, `archive`, `pdf`, `metadata`, `toc` (OCR), `characters`, `relationships`, `provider` (ComicVine), `web` (Wikipedia lookup), `repo`, `protocol`, `commands`, `models` |
 | Database | Schema v13 (FTS5, metadata lock, smart collections, file-scoped progress, multi-issue files, series-scoped character roster, typed character relationships, provider cache/links/proposals) with versioned migrations and pre-migration backups |
 | Archive support | CBZ, ZIP, CBR, image PDF, image folders; single-file roots and multi-issue (split) files |
-| Tests / lint | 61 Rust integration tests (+2 behind `--ignored`: OCR split, live web lookup), 34 Vitest tests, clippy `-D warnings`, eslint. Release workflow (Linux test + Windows NSIS build + tag-gated publish). No Prettier/rustfmt config. |
+| Tests / lint | 62 Rust integration tests (+2 behind `--ignored`: OCR split, live web lookup), 34 Vitest tests, clippy `-D warnings`, eslint. Release workflow (Linux test + Windows NSIS build + tag-gated publish). No Prettier/rustfmt config. |
 | Security config | Tightened CSP, scoped capability set |
 | Docs | `ARCHITECTURE.md`, `DATA_MODEL.md`, `HANDOVER.md`, this file |
 
@@ -506,8 +506,11 @@ appearances.
 - [~] Appearance lists are spoiler-filtered through the shared `repo::apply_spoilers`
   (`character_appearances_are_spoiler_filtered`, which hides the title of an issue past the
   frontier). **Only the title is hidden** — the issue number and count stay visible by design.
-- [ ] Portrait images, alias editing UI, and `is_death`/`is_first_appearance`/`appearance_type`
-  flags. **Not built** — the v11 tables carry only name, description, aliases and issue links.
+- [~] Portraits, alias editing UI and `is_death`/`is_first_appearance`/`appearance_type` flags.
+  **Aliases are now populated from ComicVine** (`provider::enrich_characters` writes
+  `character_aliases`, name excluded), and a one-line bio replaces the derived summary with
+  `description_source = 'web'` and a source URL. **Portraits, alias editing in the UI, and the
+  appearance-type flags are still not built.**
 - [ ] Cross-series identity. Characters are unique per `(series_id, name)`, so the same
   character in two runs is two rows. **No universe-wide merge exists**; a merge UI is the
   prerequisite for a real universe graph, timelines and arc tracking. (Typed links can be
@@ -533,6 +536,14 @@ A graph of character relationships with types and directions.
 - [x] Editable rather than automatic: the character modal lists edges, adds a link from any other
   recorded character, edits the status inline and deletes the edge. Nothing is inferred from the
   `<Characters>` tag. (`RelationshipsPanel` in `src/components/Relationships.tsx`.)
+- [~] Population from the provider, filtered to the library. `provider::propose_edges` reads each
+  linked character's ComicVine friends/enemies/teams, then **drops any edge whose other end is not
+  already a local character with a provider id** — Sonic has 140 friends and 133 enemies across all
+  continuities but only ~21/~25 exist in an IDW run, so an unfiltered import would fill the graph
+  with nodes that have no issues. Mutual pairs dedupe, and accepting creates real typed edges
+  (`provider_edges_exclude_characters_outside_the_library`: Tails kept, Knuckles dropped).
+  **Only `friend_of`/`enemy_of`/`member_of` are mapped** — ComicVine is binary, so mentor/parent/
+  rival/sibling cannot be inferred.
 - [ ] Interactive node graph. **Not built** — links are a list in the character modal, with no
   graph layout or navigation surface of its own.
 - [ ] Spoiler filtering. **Not built** — `reveal_issue_id` and `is_spoiler` from

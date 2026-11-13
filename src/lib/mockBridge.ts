@@ -515,6 +515,8 @@ const handlers: Record<string, (args: Json) => unknown> = {
     throw new Error("ComicVine lookups are disabled in the mock library");
   },
   decide_provider_proposal: () => 0,
+  propose_series_relationships: () => [],
+  enrich_series_characters: () => 0,
   universes: () => {
     const groups = new Map<string, Json>();
     for (const series of recomputeSeries()) {

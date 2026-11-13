@@ -32,6 +32,7 @@ import type {
   ProviderProposal,
   ProviderProposalRow,
   ProviderStatus,
+  ProposedEdge,
   TocEntry,
   LibraryRoot,
   LibrarySnapshot,
@@ -243,6 +244,10 @@ export const api = {
     command<ProviderLookup>("lookup_series_provider", { seriesId }),
   proposeSeriesCharacters: (seriesId: string) =>
     command<ProviderProposal>("propose_series_characters", { seriesId }),
+  proposeSeriesRelationships: (seriesId: string) =>
+    command<ProposedEdge[]>("propose_series_relationships", { seriesId }),
+  enrichSeriesCharacters: (seriesId: string) =>
+    command<number>("enrich_series_characters", { seriesId }),
   providerProposals: () => command<ProviderProposalRow[]>("provider_proposals"),
   decideProviderProposal: (proposalId: string, accept: boolean) =>
     command<number>("decide_provider_proposal", { proposalId, accept }),

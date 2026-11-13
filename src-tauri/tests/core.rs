@@ -3577,3 +3577,114 @@ fn provider_rate_limiter_refuses_past_the_hourly_budget() {
     // The budget is per resource, not global.
     assert!(limiter.check_for_test("volume").is_ok());
 }
+
+#[test]
+fn provider_edges_exclude_characters_outside_the_library() {
+    use comic_reader_lib::provider;
+
+    let (dir, db) = setup("provider-edges");
+    let library_dir = dir.join("library");
+    std::fs::create_dir_all(&library_dir).unwrap();
+    write_cbz_with_characters(&library_dir.join("Sonic 001.cbz"), "Sonic, Tails, Amy", "1");
+    db.with(|conn| library::import_root(conn, &library_dir)).unwrap();
+    let series_id = series_id_for(&db, "Archie Sonic");
+
+    // Two local characters with provider identity; Amy is deliberately left
+    // without one to prove name-matching alone is not used.
+    let characters = db
+        .with(|conn| comic_reader_lib::characters::series_characters(conn, &series_id))
+        .unwrap();
+    let sonic = characters.iter().find(|c| c.name == "Sonic").unwrap().id.clone();
+    let tails = characters.iter().find(|c| c.name == "Tails").unwrap().id.clone();
+    db.with(|conn| {
+        conn.execute(
+            "UPDATE characters SET provider = 'comicvine', provider_id = '45343' WHERE id = ?1",
+            [&sonic],
+        )?;
+        conn.execute(
+            "UPDATE characters SET provider = 'comicvine', provider_id = '45344' WHERE id = ?1",
+            [&tails],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    // Sonic's provider record lists Tails (in library) and Knuckles (not in
+    // library) as friends, plus Amy by name only.
+    db.with(|conn| {
+        conn.execute(
+            "INSERT INTO provider_cache
+                (id, provider, resource, external_id, body, fetched_at)
+             VALUES ('sonic', 'comicvine', 'character', '45343', ?1, '2026-01-01T00:00:00Z')",
+            [r#"{"results":{"id":45343,"name":"Sonic","deck":"Fast hedgehog.",
+                "aliases":"Blue Blur\r\nSonny",
+                "character_friends":[{"id":45344,"name":"Tails"},{"id":99999,"name":"Knuckles"}],
+                "character_enemies":[],"teams":[]}}"#],
+        )?;
+        conn.execute(
+            "INSERT INTO provider_cache
+                (id, provider, resource, external_id, body, fetched_at)
+             VALUES ('tails', 'comicvine', 'character', '45344', ?1, '2026-01-01T00:00:00Z')",
+            [r#"{"results":{"id":45344,"name":"Tails","deck":"Two-tailed fox.",
+                "aliases":null,"character_friends":[{"id":45343,"name":"Sonic"}],
+                "character_enemies":[],"teams":[]}}"#],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    let limiter = provider::RateLimiter::new();
+    let edges = db
+        .with(|conn| provider::propose_edges(conn, &limiter, &series_id))
+        .unwrap();
+
+    assert_eq!(edges.len(), 1, "only the mutual in-library pair survives");
+    assert_eq!(edges[0].relationship_type, "friend_of");
+    assert_eq!(edges[0].source, "character_friends");
+    let pair = [edges[0].character_id.clone(), edges[0].other_id.clone()];
+    assert!(pair.contains(&sonic) && pair.contains(&tails));
+
+    // Bio and aliases come from the same record.
+    let enriched = db
+        .with(|conn| provider::enrich_characters(conn, &limiter, &series_id))
+        .unwrap();
+    assert_eq!(enriched, 2);
+    let (description, source, alias_count): (String, String, i64) = db
+        .with(|conn| {
+            conn.query_row(
+                "SELECT description, description_source,
+                        (SELECT count(*) FROM character_aliases WHERE character_id = c.id)
+                 FROM characters c WHERE id = ?1",
+                [&sonic],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(Into::into)
+        })
+        .unwrap();
+    assert_eq!(source, "web");
+    assert!(description.contains("Fast hedgehog"));
+    assert!(!description.contains('<'));
+    assert_eq!(alias_count, 2, "both aliases stored, name excluded");
+
+    // Accepting the edges creates real typed relationships.
+    let payload: Vec<serde_json::Value> = edges
+        .iter()
+        .map(|edge| {
+            serde_json::json!({
+                "characterId": edge.character_id,
+                "otherId": edge.other_id,
+                "relationshipType": edge.relationship_type,
+            })
+        })
+        .collect();
+    let created = db
+        .with(|conn| provider::accept_edges(conn, &payload))
+        .unwrap();
+    assert_eq!(created, 1);
+    let relationships = db
+        .with(|conn| comic_reader_lib::relationships::for_character(conn, &sonic))
+        .unwrap();
+    assert_eq!(relationships.len(), 1);
+    assert_eq!(relationships[0].name, "Tails");
+    assert_eq!(relationships[0].label, "Friend of");
+}

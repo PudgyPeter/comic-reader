@@ -169,6 +169,8 @@ pub fn run() {
             commands::propose_series_characters,
             commands::provider_proposals,
             commands::decide_provider_proposal,
+            commands::propose_series_relationships,
+            commands::enrich_series_characters,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -308,7 +308,10 @@ Verified: `cargo test` 34 passed, `npm test` 34 passed, `npm run typecheck`, `np
   across imports) and `provider_proposals` (accept/reject queue). Key lives in settings, never
   compiled in; `RateLimiter` enforces 200/resource/hour locally. Series page has a lookup +
   propose/accept panel. Not built: per-issue proposal screens, title/summary proposals,
-  provenance display with fetch date, and any non-ComicVine provider.
+  provenance display with fetch date, and any non-ComicVine provider. Character bios (`deck`,
+  capped) and aliases are filled by `enrich_series_characters`; relationship edges come from
+  `propose_series_relationships`, which intersects the provider graph with the local roster and
+  maps friends/enemies/teams to `friend_of`/`enemy_of`/`member_of` only.
 - **Universes**: derived from the free-text `series.universe` label — `/universes` and
   `/universes/:name` show the grouped series, characters, publishers and progress
   (`repo::universe_summaries`, `repo::universe_detail`). There is no universe table and no

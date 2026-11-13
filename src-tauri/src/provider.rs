@@ -653,3 +653,268 @@ fn strip_markup(input: &str) -> String {
     // A blurb is shown beside library data; keep it to a readable paragraph.
     trimmed.chars().take(700).collect()
 }
+
+/// Character fields that carry a relationship list, and the local type each one
+/// maps to. ComicVine is binary (friend/enemy) plus teams; the local schema is
+/// typed, so the mapping is the closest honest match rather than a guess.
+const EDGE_FIELDS: [(&str, &str); 3] = [
+    ("character_friends", "friend_of"),
+    ("character_enemies", "enemy_of"),
+    ("teams", "member_of"),
+];
+
+/// Full character record, including the relationship-bearing lists.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProviderCharacter {
+    pub id: u64,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub deck: Option<String>,
+    #[serde(default)]
+    pub real_name: Option<String>,
+    #[serde(default)]
+    pub aliases: Option<String>,
+    #[serde(default)]
+    pub character_friends: Vec<ProviderNamedRef>,
+    #[serde(default)]
+    pub character_enemies: Vec<ProviderNamedRef>,
+    #[serde(default)]
+    pub teams: Vec<ProviderNamedRef>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProviderNamedRef {
+    pub id: u64,
+    #[serde(default)]
+    pub name: String,
+}
+
+#[derive(Deserialize)]
+struct CharacterResponse {
+    results: ProviderCharacter,
+}
+
+/// Fetches one character record. This is the only request needed to get the
+/// one-line bio, aliases and every relationship list at once.
+pub fn character(
+    conn: &Connection,
+    limiter: &RateLimiter,
+    character_id: u64,
+) -> AppResult<ProviderCharacter> {
+    let body = cached(conn, limiter, "character", &character_id.to_string(), |key| {
+        get(key, &format!("character/4005-{character_id}"), &[])
+    })?;
+    let response: CharacterResponse = serde_json::from_str(&body)
+        .map_err(|err| AppError::message(format!("cannot parse ComicVine character: {err}")))?;
+    Ok(response.results)
+}
+
+/// One proposed edge, already filtered to characters that exist in the library.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProposedEdge {
+    pub character_id: String,
+    pub character_name: String,
+    pub other_id: String,
+    pub other_name: String,
+    pub relationship_type: String,
+    pub source: String,
+}
+
+/// Builds relationship edges for a series' roster, keeping only pairs where
+/// **both** ends are in the library.
+///
+/// ComicVine's friendship/enmity lists span the character's entire publication
+/// history: Sonic has 140 friends and 133 enemies across every continuity, but
+/// only ~21 and ~25 of those exist in an IDW run. Creating the rest would fill
+/// the graph with nodes that have no issues, no pages and no reading progress,
+/// so the graph would be mostly noise. Intersecting against the local roster is
+/// what turns the provider's global lists into edges this library can actually
+/// draw.
+///
+/// Deduplication is also required: a mutual friendship (A lists B, B lists A) is
+/// one local edge, and `relationships::create` would otherwise see two inserts.
+pub fn propose_edges(
+    conn: &Connection,
+    limiter: &RateLimiter,
+    series_id: &str,
+) -> AppResult<Vec<ProposedEdge>> {
+    // Local characters for this series, keyed by provider id. Characters without
+    // a provider id cannot participate: matching by name across continuities is
+    // how the wrong person gets linked.
+    let mut locals: HashMap<String, (String, String)> = HashMap::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT id, name, provider_id FROM characters
+             WHERE series_id = ?1 AND provider = 'comicvine' AND provider_id IS NOT NULL",
+        )?;
+        let rows = stmt.query_map([series_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (id, name, provider_id) = row?;
+            locals.insert(provider_id, (id, name));
+        }
+    }
+    if locals.len() < 2 {
+        return Ok(Vec::new());
+    }
+
+    let mut edges: Vec<ProposedEdge> = Vec::new();
+    let mut seen: std::collections::HashSet<(String, String, String)> =
+        std::collections::HashSet::new();
+
+    for (provider_id, (local_id, local_name)) in locals.iter() {
+        let Ok(external_id) = provider_id.parse::<u64>() else {
+            continue;
+        };
+        let record = character(conn, limiter, external_id)?;
+        for (field, relationship_type) in EDGE_FIELDS {
+            let list = match field {
+                "character_friends" => &record.character_friends,
+                "character_enemies" => &record.character_enemies,
+                _ => &record.teams,
+            };
+            for other in list {
+                let Some((other_local, other_name)) = locals.get(&other.id.to_string()) else {
+                    continue;
+                };
+                if other_local == local_id {
+                    continue;
+                }
+                // `member_of` points at a team, which is not a character row, so
+                // a team edge is only usable when the team itself is in the
+                // roster (rare, but it keeps the rule uniform).
+                let mut pair = [local_id.clone(), other_local.clone()];
+                pair.sort();
+                let key = (pair[0].clone(), pair[1].clone(), relationship_type.to_string());
+                if !seen.insert(key) {
+                    continue;
+                }
+                edges.push(ProposedEdge {
+                    character_id: local_id.clone(),
+                    character_name: local_name.clone(),
+                    other_id: other_local.clone(),
+                    other_name: other_name.clone(),
+                    relationship_type: relationship_type.to_string(),
+                    source: field.to_string(),
+                });
+            }
+        }
+    }
+    edges.sort_by(|a, b| {
+        a.character_name
+            .cmp(&b.character_name)
+            .then_with(|| a.other_name.cmp(&b.other_name))
+    });
+    Ok(edges)
+}
+
+/// Applies accepted edges. Symmetric types collapse to one row via
+/// `relationships::create`, and a duplicate or reversed edge is a no-op.
+pub fn accept_edges(
+    conn: &Connection,
+    edges: &[serde_json::Value],
+) -> AppResult<usize> {
+    let mut created = 0;
+    for edge in edges {
+        let (Some(character_id), Some(other_id), Some(kind)) = (
+            edge.get("characterId").and_then(serde_json::Value::as_str),
+            edge.get("otherId").and_then(serde_json::Value::as_str),
+            edge.get("relationshipType").and_then(serde_json::Value::as_str),
+        ) else {
+            continue;
+        };
+        let input = crate::models::RelationshipInput {
+            other_character_id: other_id.to_string(),
+            relationship_type: kind.to_string(),
+            status: Some("active".into()),
+            description: None,
+        };
+        // A rejected edge in a previous run must not stop the rest.
+        if crate::relationships::create(conn, character_id, &input).is_ok() {
+            created += 1;
+        }
+    }
+    Ok(created)
+}
+
+/// Fills in a short bio and aliases for characters already linked to ComicVine.
+///
+/// The `deck` field is used, not `description`: the full article is often 16 KB of
+/// publication history ("was named Princess Sally in the American version of
+/// Sonic CD"), which is the wrong thing to show beside library data. Anything
+/// user-written or already sourced elsewhere is left alone.
+pub fn enrich_characters(
+    conn: &Connection,
+    limiter: &RateLimiter,
+    series_id: &str,
+) -> AppResult<usize> {
+    let mut targets: Vec<(String, String)> = Vec::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT id, provider_id FROM characters
+             WHERE series_id = ?1 AND provider = 'comicvine' AND provider_id IS NOT NULL",
+        )?;
+        let rows = stmt.query_map([series_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            targets.push(row?);
+        }
+    }
+
+    let timestamp = now();
+    let mut enriched = 0;
+    for (character_id, provider_id) in targets {
+        let Ok(external_id) = provider_id.parse::<u64>() else {
+            continue;
+        };
+        let record = character(conn, limiter, external_id)?;
+        let deck = record
+            .deck
+            .as_deref()
+            .map(strip_markup)
+            .filter(|text| !text.is_empty())
+            .map(|text| text.chars().take(600).collect::<String>());
+        if let Some(deck) = deck {
+            // Only replace an empty or previously-derived description, never a
+            // manual edit or the local appearance summary.
+            let changed = conn.execute(
+                "UPDATE characters
+                 SET description = ?2, description_source = 'web', source_url = ?3,
+                     description_updated_at = ?4, updated_at = ?4
+                 WHERE id = ?1
+                   AND (description IS NULL OR trim(description) = ''
+                        OR description_source = 'comic')",
+                params![
+                    character_id,
+                    deck,
+                    format!("https://comicvine.gamespot.com/character/4005-{external_id}/"),
+                    timestamp
+                ],
+            )?;
+            enriched += changed;
+        }
+
+        if let Some(aliases) = record.aliases.as_deref() {
+            for alias in aliases.split(['\r', '\n']) {
+                let cleaned = alias.trim();
+                if cleaned.is_empty() || cleaned.eq_ignore_ascii_case(&record.name) {
+                    continue;
+                }
+                conn.execute(
+                    "INSERT OR IGNORE INTO character_aliases (id, character_id, alias, alias_type)
+                     VALUES (?1, ?2, ?3, 'alias')",
+                    params![new_id(), character_id, cleaned],
+                )?;
+            }
+        }
+    }
+    Ok(enriched)
+}

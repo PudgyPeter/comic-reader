@@ -1596,14 +1596,62 @@ pub async fn decide_provider_proposal(
                 .and_then(Value::as_array)
                 .cloned()
                 .unwrap_or_default();
-            let applied = if accept {
-                provider::accept_character_credits(conn, &entity, &local_id, &credits)?
-            } else {
+            let edges = parsed
+                .get("edges")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let applied = if !accept {
                 0
+            } else if !edges.is_empty() {
+                provider::accept_edges(conn, &edges)?
+            } else {
+                provider::accept_character_credits(conn, &entity, &local_id, &credits)?
             };
             provider::decide(conn, &proposal_id, accept)?;
             Ok(applied)
         })
+    })
+    .await
+    .map_err(|err| AppError::message(err.to_string()))?
+}
+
+#[tauri::command]
+pub async fn propose_series_relationships(
+    state: State<'_, AppState>,
+    series_id: String,
+) -> AppResult<Vec<provider::ProposedEdge>> {
+    let db = state.db.clone();
+    let limiter = state.provider_limiter.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        db.with(|conn| {
+            let edges = provider::propose_edges(conn, &limiter, &series_id)?;
+            let payload = json!({ "edges": edges, "kind": "relationships" });
+            let source = "https://comicvine.gamespot.com/";
+            provider::queue_proposal(
+                conn,
+                "relationships",
+                "series",
+                &series_id,
+                &payload,
+                Some(source),
+            )?;
+            Ok(edges)
+        })
+    })
+    .await
+    .map_err(|err| AppError::message(err.to_string()))?
+}
+
+#[tauri::command]
+pub async fn enrich_series_characters(
+    state: State<'_, AppState>,
+    series_id: String,
+) -> AppResult<usize> {
+    let db = state.db.clone();
+    let limiter = state.provider_limiter.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        db.with(|conn| provider::enrich_characters(conn, &limiter, &series_id))
     })
     .await
     .map_err(|err| AppError::message(err.to_string()))?

@@ -598,6 +598,15 @@ export interface ProviderProposal {
   credits: { id: number; name: string }[];
 }
 
+export interface ProposedEdge {
+  characterId: string;
+  characterName: string;
+  otherId: string;
+  otherName: string;
+  relationshipType: string;
+  source: string;
+}
+
 export interface ProviderProposalRow {
   id: string;
   entity: "series" | "issue";
