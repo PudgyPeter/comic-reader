@@ -234,6 +234,13 @@ pub struct MatchFilePatch {
 #[serde(rename_all = "camelCase")]
 pub struct TocEntry {
     pub title: String,
+    /// Series named by the row, when the contents page prints one. A collected
+    /// edition can mix mini-series with the main run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub series: Option<String>,
+    /// Issue number as printed ("35"), when the row names an issue.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub number: String,
     pub printed_page: i64,
 }
 
@@ -253,6 +260,10 @@ pub struct SplitProposal {
 #[serde(rename_all = "camelCase")]
 pub struct SplitEntry {
     pub title: String,
+    /// Series named by the contents row. A collected edition can reprint
+    /// several series, so this is per range rather than per file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub series: Option<String>,
     pub number: String,
     pub printed_page: i64,
     pub start_page: i64,
@@ -265,6 +276,10 @@ pub struct SplitEntry {
 #[serde(rename_all = "camelCase")]
 pub struct SplitRange {
     pub title: String,
+    /// Series to file this range under. `None` falls back to the split's
+    /// `series_title`, which is the file name.
+    #[serde(default)]
+    pub series: Option<String>,
     pub number: String,
     pub start_page: i64,
     pub end_page: i64,
@@ -786,4 +801,46 @@ pub struct CharacterSummary {
     pub extract: String,
     pub url: String,
     pub source: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderStatus {
+    pub key_set: bool,
+    pub pending_proposals: i64,
+    pub cached_responses: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderLookup {
+    pub external_id: String,
+    pub name: String,
+    pub publisher: Option<String>,
+    pub start_year: Option<String>,
+    pub issue_count: Option<i64>,
+    /// Short series-level note derived from the provider record: publisher, run
+    /// start and issue count, plus the trimmed volume blurb.
+    pub descriptor: String,
+    pub source_url: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderProposal {
+    pub id: String,
+    pub matched_issues: i64,
+    pub local_issues: i64,
+    pub credits: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderProposalRow {
+    pub id: String,
+    pub entity: String,
+    pub local_id: String,
+    pub credits: Vec<serde_json::Value>,
+    pub source_url: Option<String>,
+    pub created_at: String,
 }

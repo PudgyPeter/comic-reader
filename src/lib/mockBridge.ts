@@ -501,6 +501,20 @@ const handlers: Record<string, (args: Json) => unknown> = {
     if (index >= 0) mockRelationships.splice(index, 1);
     return null;
   },
+  provider_status: () => ({
+    keySet: false,
+    pendingProposals: 0,
+    cachedResponses: 0,
+  }),
+  set_provider_key: () => null,
+  provider_proposals: () => [],
+  lookup_series_provider: () => {
+    throw new Error("ComicVine lookups are disabled in the mock library");
+  },
+  propose_series_characters: () => {
+    throw new Error("ComicVine lookups are disabled in the mock library");
+  },
+  decide_provider_proposal: () => 0,
   universes: () => {
     const groups = new Map<string, Json>();
     for (const series of recomputeSeries()) {

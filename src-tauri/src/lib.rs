@@ -9,6 +9,7 @@ pub mod models;
 pub mod pdf;
 pub mod protocol;
 pub mod toc;
+pub mod provider;
 pub mod relationships;
 pub mod repo;
 pub mod web;
@@ -54,6 +55,7 @@ pub fn run() {
                 cache_dir,
                 models_dir,
                 import_control: Arc::new(library::ImportControl::new()),
+                provider_limiter: Arc::new(provider::RateLimiter::new()),
             });
             Ok(())
         })
@@ -161,6 +163,12 @@ pub fn run() {
             commands::universes,
             commands::universe_detail,
             commands::lookup_character,
+            commands::provider_status,
+            commands::set_provider_key,
+            commands::lookup_series_provider,
+            commands::propose_series_characters,
+            commands::provider_proposals,
+            commands::decide_provider_proposal,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

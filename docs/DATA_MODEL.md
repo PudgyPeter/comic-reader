@@ -904,6 +904,13 @@ protection reference characters.
 > `description_source` (`comic`/`web`/`manual`) plus `source_url`; `character_appearances` links
 > character to issue with a `source` (`comicinfo`/`manual`). There is no `assets`/portrait
 > column, no `appearance_type`, and no `is_death`/`is_return`/`is_first_appearance` yet.
+> Provider tables (schema v13): `provider_cache` (raw response per provider/resource/external
+> id), `provider_links` (resolved local↔external identity with confidence + reason) and
+> `provider_proposals` (review queue, `decision` NULL/accepted/rejected). `characters` gained
+> `provider` and `provider_id`, which carry global identity without changing the v11
+> `UNIQUE (series_id, name)` scope. **Kept:** the identity scope is still per series, so a
+> provider id is a hint for a future merge, not a merge.
+>
 > `character_relationships` **landed in schema v12** with a narrower shape than §10.3: TEXT
 > UUID ids, 11 seeded `relationship_types` with `forward_label`/`reverse_label`/`is_symmetric`,
 > `status` (`active`/`former`/`unknown`/`secret`) and a free-text `description`. `is_spoiler`,

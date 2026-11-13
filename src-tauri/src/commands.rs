@@ -5,6 +5,9 @@ use tauri::{Emitter, State};
 
 use crate::db::Database;
 use crate::error::{AppError, AppResult};
+use crate::provider;
+use rusqlite::OptionalExtension;
+use serde_json::{json, Value};
 use crate::library;
 use crate::models::*;
 use crate::repo;
@@ -14,6 +17,8 @@ pub struct AppState {
     pub cache_dir: PathBuf,
     pub models_dir: PathBuf,
     pub import_control: Arc<library::ImportControl>,
+    /// Local request counter for ComicVine's per-resource hourly budget.
+    pub provider_limiter: Arc<provider::RateLimiter>,
 }
 
 #[tauri::command]
@@ -1337,4 +1342,269 @@ pub async fn lookup_character(name: String) -> AppResult<CharacterSummary> {
     tauri::async_runtime::spawn_blocking(move || crate::web::lookup_character(&name))
         .await
         .map_err(|err| AppError::message(err.to_string()))?
+}
+
+#[tauri::command]
+pub async fn provider_status(state: State<'_, AppState>) -> AppResult<ProviderStatus> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        db.with(|conn| {
+            let key_set = provider::api_key(conn).is_ok();
+            let pending: i64 = conn.query_row(
+                "SELECT count(*) FROM provider_proposals WHERE decision IS NULL",
+                [],
+                |row| row.get(0),
+            )?;
+            let cached: i64 = conn.query_row(
+                "SELECT count(*) FROM provider_cache WHERE provider = 'comicvine'",
+                [],
+                |row| row.get(0),
+            )?;
+            Ok(ProviderStatus {
+                key_set,
+                pending_proposals: pending,
+                cached_responses: cached,
+            })
+        })
+    })
+    .await
+    .map_err(|err| AppError::message(err.to_string()))?
+}
+
+#[tauri::command]
+pub async fn set_provider_key(state: State<'_, AppState>, key: String) -> AppResult<()> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        db.with(|conn| {
+            let trimmed = key.trim();
+            if trimmed.is_empty() {
+                conn.execute("DELETE FROM settings WHERE key = 'comicVineApiKey'", [])?;
+            } else {
+                conn.execute(
+                    "INSERT INTO settings (key, value) VALUES ('comicVineApiKey', ?1)
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    [trimmed],
+                )?;
+            }
+            Ok(())
+        })
+    })
+    .await
+    .map_err(|err| AppError::message(err.to_string()))?
+}
+
+#[tauri::command]
+pub async fn lookup_series_provider(
+    state: State<'_, AppState>,
+    series_id: String,
+) -> AppResult<ProviderLookup> {
+    let db = state.db.clone();
+    let limiter = state.provider_limiter.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        db.with(|conn| {
+            let (title, publisher) = conn
+                .query_row(
+                    "SELECT title, publisher FROM series WHERE id = ?1",
+                    [&series_id],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+                )
+                .map_err(|_| AppError::not_found("series"))?;
+            let number: Option<String> = conn
+                .query_row(
+                    "SELECT number FROM issues WHERE series_id = ?1 ORDER BY sort_number LIMIT 1",
+                    [&series_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+
+            let volume = match provider::linked_external_id(conn, "series", &series_id)? {
+                Some(id) => {
+                    let id = id
+                        .parse::<u64>()
+                        .map_err(|_| AppError::invalid("stored provider id is not numeric"))?;
+                    provider::volume(conn, &limiter, id)?
+                }
+                None => {
+                    provider::resolve_volume(
+                        conn,
+                        &limiter,
+                        &title,
+                        publisher.as_deref(),
+                        number.as_deref(),
+                    )?
+                }
+            };
+            provider::remember_link(
+                conn,
+                "series",
+                &series_id,
+                &volume.id.to_string(),
+                1.0,
+                "resolved by title, publisher and issue-number containment",
+            )?;
+            let (descriptor, source_url) = provider::series_descriptor(conn, &limiter, volume.id)?;
+            Ok(ProviderLookup {
+                external_id: volume.id.to_string(),
+                name: volume.name,
+                publisher: volume.publisher.as_ref().map(|entry| entry.name.clone()),
+                start_year: volume.start_year,
+                issue_count: volume.count_of_issues.map(i64::from),
+                descriptor,
+                source_url,
+            })
+        })
+    })
+    .await
+    .map_err(|err| AppError::message(err.to_string()))?
+}
+
+#[tauri::command]
+pub async fn propose_series_characters(
+    state: State<'_, AppState>,
+    series_id: String,
+) -> AppResult<ProviderProposal> {
+    let db = state.db.clone();
+    let limiter = state.provider_limiter.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        db.with(|conn| {
+            let external = provider::linked_external_id(conn, "series", &series_id)?
+                .ok_or_else(|| AppError::invalid("look up this series on ComicVine first"))?;
+            let volume_id = external
+                .parse::<u64>()
+                .map_err(|_| AppError::invalid("stored provider id is not numeric"))?;
+
+            // Resolve local issue numbers to provider issue ids, then union the
+            // credits. Per-issue credits are the accurate source; the volume's
+            // own credit list is coarser and sometimes empty.
+            let provider_issues = provider::volume_issues(conn, &limiter, volume_id)?;
+            let mut locals: Vec<(String, String)> = Vec::new();
+            {
+                let mut stmt = conn.prepare(
+                    "SELECT id, number FROM issues WHERE series_id = ?1 AND number <> ''",
+                )?;
+                let rows = stmt.query_map([&series_id], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?;
+                for row in rows {
+                    locals.push(row?);
+                }
+            }
+
+            let mut credits: Vec<Value> = Vec::new();
+            let mut seen = std::collections::HashSet::new();
+            let mut matched = 0;
+            for (local_id, number) in &locals {
+                let Some((_, external_issue)) = provider_issues
+                    .iter()
+                    .find(|(printed, _)| printed.trim() == number.trim())
+                else {
+                    continue;
+                };
+                matched += 1;
+                let record = provider::issue(conn, &limiter, *external_issue)?;
+                for credit in provider::credit_names(&record) {
+                    let key = credit
+                        .get("id")
+                        .and_then(Value::as_u64)
+                        .unwrap_or_default();
+                    if seen.insert(key) {
+                        credits.push(credit);
+                    }
+                }
+                provider::remember_link(
+                    conn,
+                    "issue",
+                    local_id,
+                    &external_issue.to_string(),
+                    1.0,
+                    "matched by printed issue number within the linked volume",
+                )?;
+            }
+
+            let payload = json!({
+                "credits": credits,
+                "matchedIssues": matched,
+                "localIssues": locals.len(),
+            });
+            let source = format!("https://comicvine.gamespot.com/volume/4050-{volume_id}/");
+            let proposal_id =
+                provider::queue_proposal(conn, "chars", "series", &series_id, &payload, Some(&source))?;
+            Ok(ProviderProposal {
+                id: proposal_id,
+                matched_issues: matched,
+                local_issues: locals.len() as i64,
+                credits,
+            })
+        })
+    })
+    .await
+    .map_err(|err| AppError::message(err.to_string()))?
+}
+
+#[tauri::command]
+pub async fn provider_proposals(state: State<'_, AppState>) -> AppResult<Vec<ProviderProposalRow>> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        db.with(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, entity, local_id, payload, source_url, created_at
+                 FROM provider_proposals WHERE decision IS NULL
+                 ORDER BY created_at DESC",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                let payload: String = row.get(3)?;
+                let parsed: Value = serde_json::from_str(&payload).unwrap_or(Value::Null);
+                Ok(ProviderProposalRow {
+                    id: row.get(0)?,
+                    entity: row.get(1)?,
+                    local_id: row.get(2)?,
+                    credits: parsed
+                        .get("credits")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default(),
+                    source_url: row.get(4)?,
+                    created_at: row.get(5)?,
+                })
+            })?;
+            Ok(rows.collect::<Result<Vec<_>, rusqlite::Error>>()?)
+        })
+    })
+    .await
+    .map_err(|err| AppError::message(err.to_string()))?
+}
+
+#[tauri::command]
+pub async fn decide_provider_proposal(
+    state: State<'_, AppState>,
+    proposal_id: String,
+    accept: bool,
+) -> AppResult<usize> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        db.with(|conn| {
+            let (entity, local_id, payload): (String, String, String) = conn.query_row(
+                "SELECT entity, local_id, payload FROM provider_proposals
+                 WHERE id = ?1 AND decision IS NULL",
+                [&proposal_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+            let parsed: Value = serde_json::from_str(&payload)
+                .map_err(|err| AppError::message(format!("corrupt proposal payload: {err}")))?;
+            let credits = parsed
+                .get("credits")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let applied = if accept {
+                provider::accept_character_credits(conn, &entity, &local_id, &credits)?
+            } else {
+                0
+            };
+            provider::decide(conn, &proposal_id, accept)?;
+            Ok(applied)
+        })
+    })
+    .await
+    .map_err(|err| AppError::message(err.to_string()))?
 }

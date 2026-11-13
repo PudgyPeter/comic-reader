@@ -5,7 +5,7 @@ use rusqlite::Connection;
 
 use crate::error::{AppError, AppResult};
 
-pub const SCHEMA_VERSION: i64 = 12;
+pub const SCHEMA_VERSION: i64 = 13;
 
 pub struct Database {
     conn: Mutex<Connection>,
@@ -88,6 +88,9 @@ impl Database {
             }
             if version < 12 {
                 conn.execute_batch(MIGRATION_12)?;
+            }
+            if version < 13 {
+                conn.execute_batch(MIGRATION_13)?;
             }
             if version < SCHEMA_VERSION {
                 conn.execute(
@@ -669,6 +672,84 @@ CREATE TABLE IF NOT EXISTS character_relationships (
 
 CREATE INDEX IF NOT EXISTS idx_relationships_a ON character_relationships(character_a_id);
 CREATE INDEX IF NOT EXISTS idx_relationships_b ON character_relationships(character_b_id);
+"#;
+
+// Provider support (schema v13).
+//
+// A provider lookup is *evidence*, not truth: it proposes character credits for
+// an issue or a collected edition, and the user accepts or rejects them. Three
+// things make that reviewable long after the fact:
+//
+//   * `provider_cache` keeps the raw response keyed by provider + resource, so a
+//     rescan is free and an offline session never re-fetches. This is also what
+//     makes ComicVine's 200-requests-per-resource-per-hour quota irrelevant.
+//   * `provider_links` remembers which provider record a local row resolved to.
+//     Resolving volume/issue identity is the expensive, error-prone step; doing
+//     it once and remembering the answer is what stops a library from drifting
+//     onto the wrong series.
+//   * `provider_proposals` is the review queue. Nothing here writes to
+//     `characters` or `character_appearances` until the user accepts.
+//
+// `characters.provider_id` / `provider` carry the global identity when a credit
+// is accepted. Characters stay unique per `(series_id, name)` (v11), so the same
+// character in two runs is still two rows; the provider columns are what make a
+// future cross-series merge possible without guessing from names.
+const MIGRATION_13: &str = r#"
+ALTER TABLE characters ADD COLUMN provider TEXT;
+ALTER TABLE characters ADD COLUMN provider_id TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_characters_provider
+    ON characters(provider, provider_id);
+
+CREATE TABLE IF NOT EXISTS provider_cache (
+    id TEXT PRIMARY KEY,
+    provider TEXT NOT NULL,
+    resource TEXT NOT NULL,
+    external_id TEXT NOT NULL,
+    body TEXT NOT NULL,
+    fetched_at TEXT NOT NULL,
+    UNIQUE (provider, resource, external_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_provider_cache_fetched
+    ON provider_cache(provider, fetched_at);
+
+CREATE TABLE IF NOT EXISTS provider_links (
+    id TEXT PRIMARY KEY,
+    provider TEXT NOT NULL,
+    -- 'series' or 'issue': which local table `local_id` points at.
+    entity TEXT NOT NULL CHECK (entity IN ('series', 'issue')),
+    local_id TEXT NOT NULL,
+    external_id TEXT NOT NULL,
+    -- How sure the resolver was, and the human-readable reason, so a wrong link
+    -- is diagnosable without re-running the lookup.
+    confidence REAL NOT NULL DEFAULT 0,
+    reason TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (provider, entity, local_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_provider_links_external
+    ON provider_links(provider, entity, external_id);
+
+CREATE TABLE IF NOT EXISTS provider_proposals (
+    id TEXT PRIMARY KEY,
+    provider TEXT NOT NULL,
+    -- 'chars' for a character-credit proposal set.
+    kind TEXT NOT NULL,
+    entity TEXT NOT NULL CHECK (entity IN ('series', 'issue')),
+    local_id TEXT NOT NULL,
+    -- JSON array of proposed names, so a set is accepted or rejected as a whole.
+    payload TEXT NOT NULL,
+    source_url TEXT,
+    created_at TEXT NOT NULL,
+    decided_at TEXT,
+    decision TEXT CHECK (decision IN ('accepted', 'rejected'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_provider_proposals_pending
+    ON provider_proposals(entity, local_id, decision);
 "#;
 
 pub fn now() -> String {

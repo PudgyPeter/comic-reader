@@ -3401,7 +3401,15 @@ pub fn propose_split(
             .enumerate()
             .map(|(index, (entry, start, end))| SplitEntry {
                 title: entry.title,
-                number: (index + 1).to_string(),
+                series: entry.series.clone(),
+                // Prefer the number printed on the contents page: a collected
+                // edition reprints existing issues, so "35" is the real number
+                // and the row's ordinal is not.
+                number: if entry.number.is_empty() {
+                    (index + 1).to_string()
+                } else {
+                    entry.number.clone()
+                },
                 printed_page: entry.printed_page,
                 start_page: start,
                 end_page: end,
@@ -3427,6 +3435,8 @@ pub fn recombine_split(
         .iter()
         .map(|entry| crate::toc::ParsedEntry {
             title: entry.title.clone(),
+            series: entry.series.clone(),
+            number: entry.number.clone(),
             printed_page: entry.printed_page,
         })
         .collect();
@@ -3441,7 +3451,15 @@ pub fn recombine_split(
             .enumerate()
             .map(|(index, (entry, start, end))| SplitEntry {
                 title: entry.title,
-                number: (index + 1).to_string(),
+                series: entry.series.clone(),
+                // Prefer the number printed on the contents page: a collected
+                // edition reprints existing issues, so "35" is the real number
+                // and the row's ordinal is not.
+                number: if entry.number.is_empty() {
+                    (index + 1).to_string()
+                } else {
+                    entry.number.clone()
+                },
                 printed_page: entry.printed_page,
                 start_page: start,
                 end_page: end,
@@ -3507,10 +3525,28 @@ pub fn apply_split(
         .filter(|title| !title.is_empty())
         .unwrap_or(&file_stem)
         .to_string();
-    let (series_id, _) = library::ensure_series(&tx, &series_title, None)?;
-
+    // Each range may belong to a different series: a collected edition can
+    // reprint a mini-series alongside the main run, and filing them all under
+    // the file name would merge two real series into one invented one.
+    let mut series_ids: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     let mut issue_ids = Vec::new();
     for range in &request.ranges {
+        let range_series = range
+            .series
+            .as_deref()
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .unwrap_or(&series_title)
+            .to_string();
+        let series_id = match series_ids.get(&range_series) {
+            Some(id) => id.clone(),
+            None => {
+                let (id, _) = library::ensure_series(&tx, &range_series, None)?;
+                series_ids.insert(range_series.clone(), id.clone());
+                id
+            }
+        };
         let issue_id = new_id();
         let sort_number = crate::metadata::parse_number(&range.number);
         tx.execute(
@@ -3523,7 +3559,7 @@ pub fn apply_split(
                 request.file_id,
                 series_id,
                 if range.title.trim().is_empty() {
-                    format!("{series_title} #{}", range.number)
+                    format!("{range_series} #{}", range.number)
                 } else {
                     range.title.clone()
                 },

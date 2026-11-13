@@ -1,12 +1,12 @@
 # Comic Reader — Development Roadmap
 
-> **Status:** CORE (Stage 1) largely implemented — 51 of 95 deliverables done, 32 partial,
-> 12 not started (foundations F1–F10 plus CORE-1…CORE-14). Reading, library, series,
+> **Status:** CORE (Stage 1) largely implemented — 51 of 95 deliverables done, 36 partial,
+> 8 not started (foundations F1–F10 plus CORE-1…CORE-14). Reading, library, series,
 > collections, orders, search (FTS5 with filters), stats, smart collections, unmatched-file
 > matching and omnibus splitting work offline. Universes group series into a shared page with
 > their characters, and characters can be linked with typed relationships (no graph view yet).
-> Metadata providers, per-profile spoilers, order import/export/sections and root relocation are
-> not started. Every deliverable is marked inline; see [`HANDOVER.md`](./HANDOVER.md) for the live
+> ComicVine enrichment is opt-in (key in settings, cached, review-queued); per-profile spoilers,
+> order import/export/sections and root relocation are not started. Every deliverable is marked inline; see [`HANDOVER.md`](./HANDOVER.md) for the live
 > remaining-work list.
 > **Companion documents:** [`ARCHITECTURE.md`](./ARCHITECTURE.md), [`DATA_MODEL.md`](./DATA_MODEL.md).
 > **Scope:** A local-first desktop comic reader and library for Tauri 2, React, TypeScript, Rust,
@@ -55,12 +55,12 @@ Deliverables are marked inline so this file stays the single source of truth:
 
 | Item | State |
 | --- | --- |
-| Tauri 2 shell | Implemented; 102 IPC commands, `comic://` asset protocol |
+| Tauri 2 shell | Implemented; 108 IPC commands, `comic://` asset protocol |
 | React UI | Library, Series, Universes, Reader, Characters, Unmatched, Collections, Orders, Search, History, Stats, Settings |
-| Rust modules | `db`, `library`, `archive`, `pdf`, `metadata`, `toc` (OCR), `characters`, `relationships`, `web` (Wikipedia lookup), `repo`, `protocol`, `commands`, `models` |
-| Database | Schema v12 (FTS5, metadata lock, smart collections, file-scoped progress, multi-issue files, series-scoped character roster, typed character relationships) with versioned migrations and pre-migration backups |
+| Rust modules | `db`, `library`, `archive`, `pdf`, `metadata`, `toc` (OCR), `characters`, `relationships`, `provider` (ComicVine), `web` (Wikipedia lookup), `repo`, `protocol`, `commands`, `models` |
+| Database | Schema v13 (FTS5, metadata lock, smart collections, file-scoped progress, multi-issue files, series-scoped character roster, typed character relationships, provider cache/links/proposals) with versioned migrations and pre-migration backups |
 | Archive support | CBZ, ZIP, CBR, image PDF, image folders; single-file roots and multi-issue (split) files |
-| Tests / lint | 54 Rust integration tests (+2 behind `--ignored`: OCR split, live web lookup), 34 Vitest tests, clippy `-D warnings`, eslint. No CI pipeline, no Prettier/rustfmt config. |
+| Tests / lint | 61 Rust integration tests (+2 behind `--ignored`: OCR split, live web lookup), 34 Vitest tests, clippy `-D warnings`, eslint. Release workflow (Linux test + Windows NSIS build + tag-gated publish). No Prettier/rustfmt config. |
 | Security config | Tightened CSP, scoped capability set |
 | Docs | `ARCHITECTURE.md`, `DATA_MODEL.md`, `HANDOVER.md`, this file |
 
@@ -108,7 +108,10 @@ Deliverables:
   emit a warning). **No resume**: a cancelled scan restarts from the beginning on the next run
   (it is incremental by relative path, so work is not lost, but it is not a resumable cursor).
 - [x] File records with format, size, page count, and status; unmatched files visible
-  (dedicated view + file reader, schema v9).
+  (dedicated view + file reader, schema v9). A corrupt archive member no longer fails the whole
+  file: `archive::scan_archive` enumerates the central directory and keeps a bad page's slot with
+  unknown dimensions, so page indices stay aligned with `page_offset` and split ranges
+  (`archive_with_a_corrupt_member_still_scans_every_page`).
 - [x] Manual rescan. **Missing files only**: a rescan flips `library_files.status` between
   `present` and `missing`; there is no separate `unreadable` state — an archive that exists but
   cannot be parsed surfaces as an import warning, and an already-indexed corrupt file only fails
@@ -272,9 +275,16 @@ Deliverables:
 - [x] Unmatched files view with a "match to issue" flow (schema v9): `/unmatched` lists loose
   files, `/file/:id` reads them with file-scoped progress/bookmarks, and matching reuses the file
   row so progress survives. Manual matching only; provider-driven match proposals are still open.
-- [x] Multi-issue files (omnibus CBZ/CBR/PDF, schema v10): the contents page is OCR'd, chapters
+- [~] Multi-issue files (omnibus CBZ/CBR/PDF, schema v10): the contents page is OCR'd, chapters
   become issues with `page_offset`/`page_count`, and the reader shows only each issue's slice.
-  Split is proposed, editable, and never applied without confirmation.
+  Split is proposed, editable, and never applied without confirmation. Two-column trade contents
+  pages now parse: rows are paired by position (each badge is matched to the heading on its own
+  side of the gutter), and each range can name its own series, so a collected edition that
+  reprints a mini-series alongside the main run splits into both. Covered by
+  `two_column_contents_page_pairs_titles_with_badges` and
+  `split_files_each_range_under_its_own_series`. **Not reliable on every book yet** — on the real
+  IDW Collection v04 page, 10 of 12 rows recover; the two lost rows are badges the detector never
+  finds, so the split would be short by two chapters.
 
 **Criticism:** automatic series grouping from filenames will be wrong often. Ship manual grouping
 and correction before promising automation.
@@ -313,14 +323,30 @@ Deliverables:
   it is applied. **No confidence scoring** — the preview shows the parse but does not rank it.
   `parse_filename`/`parse_number` have no unit tests of their own; coverage is the integration
   test `filename_parsing_handles_common_patterns`.
-- [ ] Provider adapters behind one trait, user-enabled, offline-tolerant, rate-limited.
-  **Not started.** No `Provider` trait, no HTTP client, no caching.
-- [ ] Match proposals with reasons; accept/reject; never silently overwrite user edits.
-  **Not started.** The matching that exists is manual (`/unmatched`).
-- [ ] Provenance display ("this synopsis came from X on date Y"). **Not started.**
+- [~] Provider adapters behind one trait, user-enabled, offline-tolerant, rate-limited.
+  **One provider, not a trait**: `provider.rs` implements ComicVine directly (search, volume,
+  issues, issue, credits) because a one-implementation trait is speculative abstraction. It is
+  off until the user saves a key (settings, never compiled in), every call is explicit, failures
+  never block an import, and `RateLimiter` enforces the documented 200-per-resource-per-hour
+  budget locally (ComicVine sends no quota headers). Covered by
+  `provider_cache_avoids_refetching_and_key_is_required` and
+  `provider_rate_limiter_refuses_past_the_hourly_budget`.
+- [~] Match proposals with reasons; accept/reject; never silently overwrite user edits.
+  `provider_proposals` is a review queue: `propose_series_characters` resolves each local issue by
+  printed number, fetches per-issue credits and queues the union; `decide_provider_proposal`
+  writes nothing until accepted, and accepted credits keep existing rosters untouched
+  (`provider_credits_are_proposed_then_accepted_with_identity`). **Volume resolution reasons are
+  stored but not surfaced in the UI**, and only series-level character proposals exist — there is
+  no per-issue proposal screen and no metadata (title/description/credits) proposal set.
+- [~] Provenance display ("this synopsis came from X on date Y"). A series descriptor carries its
+  ComicVine source URL and `characters.provider/provider_id` records where a credit came from;
+  **no UI shows the fetch date yet**, and the descriptor is not yet written into
+  `series.description` by a command.
 - [x] Manual metadata editing with lock (schema v7): editing, auto lock-on-save, lock-aware bulk
   edits, forced refresh from file.
-- [ ] Cache and snapshot provider responses. **Not applicable yet** (no providers).
+- [x] Cache and snapshot provider responses (schema v13 `provider_cache`, keyed by provider +
+  resource + external id). Cached responses replay without a key, so a rescan or an offline
+  session costs no requests.
 
 **Criticisms:**
 
@@ -600,7 +626,7 @@ Phase 1   CORE-1 library import -> CORE-2 single page     done, plus CBR/PDF/fol
 Phase 2   CORE-6 bookshelf + CORE-7 series organisation    done, plus unmatched + omnibus split
 Phase 3   CORE-3 zoom + CORE-4 transitions + CORE-5 prefs  done (per-series prefs partial)
 Phase 4   CORE-8 tracker + CORE-2 spread/continuous modes  done (bulk mark-to-page not built)
-Phase 5   CORE-9 metadata                                  ComicInfo done; providers NOT started
+Phase 5   CORE-9 metadata                                  ComicInfo done; ComicVine opt-in lookup
 Phase 6   CORE-11 search + CORE-12 shortcuts               done (scopes + some filters missing)
 Phase 7   CORE-13 collections + CORE-10 reading orders     done (sections/import-export missing)
 Phase 8   CORE-14 spoiler protection across all surfaces   partial (global only, not every surface)
@@ -608,8 +634,8 @@ Phase 9   Hardening                                        not started (a11y, di
 Phase 10  LATER features                                   started: roster, typed relationship links
 ```
 
-Remaining CORE work, in dependency order: provider adapters + match proposals (CORE-9),
-per-profile spoilers with per-surface leak tests (CORE-14), order import/export + sections
+Remaining CORE work, in dependency order: provider metadata proposal sets and a review screen
+(CORE-9), per-profile spoilers with per-surface leak tests (CORE-14), order import/export + sections
 (CORE-10), bulk mark-to-page and manual issue ordering (CORE-8/CORE-7), missing bookshelf format
 filter and query-error state (CORE-6), root relocation (CORE-1), per-page load/error states
 (CORE-2), then the hardening pass (a11y/focus traps, diagnostics, CI).
@@ -632,12 +658,12 @@ These are not features and must not be deferred to the end:
 
 | Area | Requirement | State |
 | --- | --- | --- |
-| Offline | Every screen works with the network disabled; test this in CI or manually each phase | `[x]` Fonts bundled locally; the only runtime request is the user-initiated character summary lookup in `web.rs` (8 s timeout, 256 KiB cap, no caller waits on it) |
+| Offline | Every screen works with the network disabled; test this in CI or manually each phase | `[x]` Fonts bundled locally; the only outbound requests are user-initiated (Wikipedia summary in `web.rs`, ComicVine in `provider.rs`), both bounded and never on the import path unless asked, and cached responses replay with no key |
 | Performance | Budgets for cold start, library scroll, reader open, and memory; measure, do not guess | `[~]` Import scans metadata only (`archive::scan_*`), so memory is flat by construction, but **no measurement is recorded** in `HANDOVER.md`; no automated budgets |
 | Accessibility | Keyboard-first, focus rings, screen reader labels, reduced motion, sufficient contrast | `[~]` Keyboard + reduced motion done; sparse labels, no dialog focus trap |
 | Error UX | Missing file, corrupt archive, DB busy, permission denied each have a designed state | `[~]` Reader/import have states; DB-busy and permission-denied are generic errors |
 | Migrations | Every schema change has a migration, a backup step, and a test from the previous version | `[x]` v1→v12 with backup-before-migrate and a v4→current test |
-| Security | New inputs (archives, XML, provider HTML) get limits and tests before release | `[~]` Entry size caps, safe XML, CSP; no fuzzing of the new OCR/archive paths |
+| Security | New inputs (archives, XML, provider HTML) get limits and tests before release | `[~]` Entry size caps, safe XML, CSP, provider body cap (2 MiB) and markup stripping; no fuzzing of the OCR/archive paths |
 | Diagnostics | Logs and a support bundle that do not leak paths or keys | `[ ]` Not started |
 | Packaging | Installers and code signing for each target; test on a clean machine | `[~]` Windows NSIS + portable exe built; unsigned, not smoke-tested on Windows |
 
@@ -648,12 +674,12 @@ These are not features and must not be deferred to the end:
 | Stage | Must be tested | State |
 | --- | --- | --- |
 | Foundations | migration runner, backup/restore, protocol handler, error serialization | `[~]` migration runner covered by the v4→current test; **backup/restore, the `comic://` handler and error serialization have no test** |
-| CORE-1 | scanner idempotency, cancellation, missing files, case collisions | `[~]` idempotency, missing files, single-file roots; cancellation only covers a pre-cancelled control plus the import loop guard, not a mid-scan cancel; no case-collision test |
+| CORE-1 | scanner idempotency, cancellation, missing files, case collisions | `[~]` idempotency, missing files, single-file roots, corrupt members (`archive_with_a_corrupt_member_still_scans_every_page`); cancellation only covers a pre-cancelled control plus the import loop guard, not a mid-scan cancel; no case-collision test |
 | CORE-2/3 | spread pairing, fit modes, zoom anchor math, memory bounds | `[~]` spread pairing tested; zoom math and memory bounds are not |
 | CORE-5 | preference resolution precedence | `[~]` only reading direction has a precedence test (file → series → global); mode/fit/background/gamma have no per-series resolution to test |
-| CORE-6/7 | virtualisation, cover placeholders, numeric ordering, unmatched match keeps progress, omnibus split keeps progress | `[~]` match-keeps-progress and split-keeps-progress covered; **ordering, cover placeholders and the progressive list have no test** (no test imports a series with more than 4 issues, so 9-before-10 is unproven) |
+| CORE-6/7 | virtualisation, cover placeholders, numeric ordering, unmatched match keeps progress, omnibus split keeps progress | `[~]` match-keeps-progress, split-keeps-progress, two-column contents pairing and per-range series are covered; **ordering, cover placeholders and the progressive list have no test** (no test imports a series with more than 4 issues, so 9-before-10 is unproven) |
 | CORE-8 | progress reconciliation across rematching and multi-issue files | `[x]` covered by the unmatched and split tests, plus `mark_to_page_sets_position_and_completes_on_last_page` |
-| CORE-9 | XML safety, filename parsing, match acceptance/rejection, offline fallback | `[~]` ComicInfo parsing and filename parsing are exercised by integration tests, but **the XML size cap / DTD refusal has no dedicated test**; providers do not exist |
+| CORE-9 | XML safety, filename parsing, match acceptance/rejection, offline fallback | `[~]` ComicInfo parsing, filename parsing, proposal acceptance/rejection, cache replay and the rate limiter are covered; **the XML size cap / DTD refusal has no dedicated test**, and no test exercises a live provider round-trip |
 | CORE-10 | reorder correctness, import/export round-trip, unresolved placeholders | `[~]` reorder covered; import/export does not exist |
 | CORE-11 | spoiler-filtered search, pagination stability | `[x]` covered |
 | CORE-13 | smart rule compilation (no injection), orphan cleanup | `[~]` injection covered; orphan cleanup N/A (FKs) |
@@ -711,8 +737,9 @@ order are still open.
   **but there is no windowed virtualiser and no measured test at 5,000 files**.
 - [~] Progress resumes correctly, including after rematch and split. **Moving/replacing a file is
   not handled** (no relocate-root flow).
-- [ ] Metadata is optional and reviewable, but **not provenance-tracked or provider-cached** —
-  there are no providers. ComicInfo and filename parsing are the whole story.
+- [~] Metadata is optional and reviewable: ComicVine is opt-in, cached and proposal-queued, and
+  accepted credits record their provider identity. **Not provenance-sourced on screen** — no fetch
+  date or source label is displayed, and only characters are proposed (not title/summary/credits).
 - [~] Orders combine issues from any publishers and track progress. **No sections, no optional
   items, no import/export, and not per-profile.**
 - [~] Search is fast and spoiler-safe on the surfaces it covers, but not every leak surface is

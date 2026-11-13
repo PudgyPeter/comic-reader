@@ -6,6 +6,7 @@ import { cx, fitLabel, modeLabel, readingDirectionLabel } from "../lib/utils";
 import { findConflicts, invalidBindings, parseBindings, formatCombo } from "../lib/shortcuts";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../lib/api";
+import { ProviderSettings } from "../components/Provider";
 
 const SHORTCUT_LABELS: Record<string, string> = {
   nextPage: "Next page",
@@ -386,6 +387,13 @@ export default function SettingsPage() {
           Comic archives are never modified. Database backups are written beside the database before
           migrations run.
         </p>
+      </Section>
+
+      <Section
+        title="Metadata provider"
+        description="Optional enrichment. Off unless you add a key; every lookup is explicit."
+      >
+        <ProviderSettings />
       </Section>
     </div>
   );

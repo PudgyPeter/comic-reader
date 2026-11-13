@@ -297,6 +297,18 @@ Verified: `cargo test` 34 passed, `npm test` 34 passed, `npm run typecheck`, `np
   the character modal (`RelationshipsPanel`), symmetric types are stored once with the smaller
   id first, and each side reads its own label. Not built: node graph, edge spoiler filtering
   (`is_spoiler`/`reveal_issue_id`), universe/progress filters.
+- **Omnibus splitting**: two-column trade contents pages are paired by geometry
+  (`toc::parse_contents_blocks`); rows carry an optional `series`, and `repo::apply_split` files
+  each range under its own series. On IDW Collection v04, 10 of 12 rows recover — two page-number
+  badges are never detected, so that split would miss two chapters. `archive::scan_archive` no
+  longer fails a file over one corrupt member; the page keeps its slot with unknown dimensions so
+  `page_offset` stays aligned.
+- **ComicVine provider (schema v13)**: `provider.rs` with search/volume/issues/issue/credits,
+  `provider_cache` (offline replay, no key needed), `provider_links` (resolved identity reused
+  across imports) and `provider_proposals` (accept/reject queue). Key lives in settings, never
+  compiled in; `RateLimiter` enforces 200/resource/hour locally. Series page has a lookup +
+  propose/accept panel. Not built: per-issue proposal screens, title/summary proposals,
+  provenance display with fetch date, and any non-ComicVine provider.
 - **Universes**: derived from the free-text `series.universe` label — `/universes` and
   `/universes/:name` show the grouped series, characters, publishers and progress
   (`repo::universe_summaries`, `repo::universe_detail`). There is no universe table and no

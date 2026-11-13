@@ -1691,6 +1691,9 @@ fn migration_from_v4_preserves_progress_and_adds_session_columns() {
              DROP TABLE IF EXISTS file_progress;
              ALTER TABLE issues DROP COLUMN page_offset;
              ALTER TABLE issues DROP COLUMN page_count;
+             DROP TABLE IF EXISTS provider_proposals;
+             DROP TABLE IF EXISTS provider_links;
+             DROP TABLE IF EXISTS provider_cache;
              DROP TABLE IF EXISTS character_relationships;
              DROP TABLE IF EXISTS relationship_types;
              DROP TABLE IF EXISTS characters;
@@ -1714,7 +1717,7 @@ fn migration_from_v4_preserves_progress_and_adds_session_columns() {
             .map_err(Into::into)
         })
         .unwrap();
-    assert_eq!(version, "12");
+    assert_eq!(version, "13");
 
     // Existing progress survives, with the new column defaulted.
     let reader = db.with(|conn| repo::reader_payload(conn, &issue.id)).unwrap();
@@ -2582,18 +2585,21 @@ fn applying_a_split_creates_ranges_and_keeps_progress() {
                     ranges: vec![
                         SplitRange {
                             title: "Chapter 1".into(),
+                            series: None,
                             number: "1".into(),
                             start_page: 0,
                             end_page: 10,
                         },
                         SplitRange {
                             title: "Chapter 2".into(),
+                            series: None,
                             number: "2".into(),
                             start_page: 10,
                             end_page: 20,
                         },
                         SplitRange {
                             title: "Chapter 3".into(),
+                            series: None,
                             number: "3".into(),
                             start_page: 20,
                             end_page: 30,
@@ -2635,6 +2641,7 @@ fn applying_a_split_creates_ranges_and_keeps_progress() {
                 series_title: None,
                 ranges: vec![SplitRange {
                     title: "Nope".into(),
+                    series: None,
                     number: "9".into(),
                     start_page: 0,
                     end_page: 5,
@@ -2671,12 +2678,14 @@ fn split_ranges_must_not_overlap_or_exceed_the_file() {
                 ranges: vec![
                     SplitRange {
                         title: "A".into(),
+                        series: None,
                         number: "1".into(),
                         start_page: 0,
                         end_page: 6,
                     },
                     SplitRange {
                         title: "B".into(),
+                        series: None,
                         number: "2".into(),
                         start_page: 5,
                         end_page: 10,
@@ -2695,6 +2704,7 @@ fn split_ranges_must_not_overlap_or_exceed_the_file() {
                 series_title: None,
                 ranges: vec![SplitRange {
                     title: "A".into(),
+                    series: None,
                     number: "1".into(),
                     start_page: 0,
                     end_page: 999,
@@ -2947,11 +2957,11 @@ fn character_name_parsing_handles_tag_noise() {
 }
 
 #[test]
-fn migration_from_v4_test_knows_about_v12_tables() {
-    // Guards the v4→current path: MIGRATION_11 and MIGRATION_12 create the
-    // character tables from scratch, so the previous test's drop-list has to
-    // stay in step with the schema.
-    let (dir, db) = setup("migrate-v12");
+fn migration_from_v4_test_knows_about_v13_tables() {
+    // Guards the v4→current path: MIGRATION_11 onward create their tables from
+    // scratch, so the previous test's drop-list has to stay in step with the
+    // schema.
+    let (dir, db) = setup("migrate-v13");
     drop(db);
     let db = Database::open(&dir.join("db")).unwrap();
     let tables: Vec<String> = db
@@ -2959,13 +2969,14 @@ fn migration_from_v4_test_knows_about_v12_tables() {
             let mut stmt = conn.prepare(
                 "SELECT name FROM sqlite_master WHERE type = 'table'
                  AND name IN ('characters', 'character_aliases', 'character_appearances',
-                              'relationship_types', 'character_relationships')",
+                              'relationship_types', 'character_relationships',
+                              'provider_cache', 'provider_links', 'provider_proposals')",
             )?;
             let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
             Ok(rows.collect::<Result<Vec<_>, rusqlite::Error>>()?)
         })
         .unwrap();
-    assert_eq!(tables.len(), 5);
+    assert_eq!(tables.len(), 8);
     let version: String = db
         .with(|conn| {
             conn.query_row(
@@ -2976,7 +2987,7 @@ fn migration_from_v4_test_knows_about_v12_tables() {
             .map_err(Into::into)
         })
         .unwrap();
-    assert_eq!(version, "12");
+    assert_eq!(version, "13");
 }
 
 #[test]
@@ -3232,4 +3243,337 @@ fn universe_read_count_uses_completed_issues() {
 
     let universes = db.with(|conn| repo::universe_summaries(conn)).unwrap();
     assert_eq!(universes[0].read_count, 1);
+}
+
+#[test]
+fn archive_with_a_corrupt_member_still_scans_every_page() {
+    // Large collected editions often carry a few damaged pages. A corrupt member
+    // must not fail the file, and it must not be dropped from the page list:
+    // page indices back `page_offset` and split ranges, so removing one would
+    // silently shift every later page.
+    let dir = temp_dir("corrupt-member");
+    let archive_path = dir.join("Damaged.cbz");
+    write_cbz(&archive_path, 6, false);
+
+    // Corrupt the local header of the third image entry while leaving the
+    // central directory intact, which is how these files usually fail.
+    let bytes = std::fs::read(&archive_path).unwrap();
+    let marker = b"page-003.png";
+    let pos = bytes
+        .windows(marker.len())
+        .position(|window| window == marker)
+        .expect("third page entry present");
+    let mut damaged = bytes.clone();
+    let sig = pos - 30;
+    damaged[sig..sig + 4].copy_from_slice(&[0, 0, 0, 0]);
+    std::fs::write(&archive_path, &damaged).unwrap();
+
+    let pages = archive::scan_archive(&archive_path).expect("scan survives a bad member");
+    assert_eq!(pages.len(), 6, "every page keeps its slot");
+    assert!(pages.iter().any(|page| page.width == 0 && page.height == 0));
+    assert_eq!(pages[2].name, "page-003.png");
+}
+
+#[test]
+fn two_column_contents_page_pairs_titles_with_badges() {
+    use comic_reader_lib::toc::{parse_contents_blocks, TextBlock};
+
+    // Geometry mirroring a real trade contents page: title blocks in two
+    // columns, each page number in a badge between them, offset by ~100px
+    // vertically from its title.
+    let heading = |left: f32, y: f32, text: &str| {
+        TextBlock::new(left, left + 260.0, y, 30.0, text.to_string())
+    };
+    let badge = |left: f32, y: f32, text: &str| {
+        TextBlock::new(left, left + 46.0, y, 26.0, text.to_string())
+    };
+
+    let blocks = vec![
+        heading(499.0, 245.0, "BAD GUYS #1"),
+        badge(1774.0, 346.0, "6"),
+        badge(2402.0, 346.0, "138"),
+        heading(2965.0, 244.0, "SONIC THE HEDGEHOG #35"),
+        heading(669.0, 752.0, "BAD GUYS #2"),
+        badge(1774.0, 851.0, "28"),
+        badge(2402.0, 851.0, "160"),
+        heading(3128.0, 776.0, "SONIC THE HEDGEHOG #36"),
+        heading(480.0, 1236.0, "BAD GUYS #3"),
+        badge(1774.0, 1336.0, "50"),
+        badge(2402.0, 1336.0, "182"),
+        heading(2969.0, 1260.0, "SONIC THE HEDGEHOG #37"),
+    ];
+
+    let entries = parse_contents_blocks(&blocks);
+    let pairs: Vec<(String, i64)> = entries
+        .iter()
+        .map(|entry| (entry.title.clone(), entry.printed_page))
+        .collect();
+    assert_eq!(
+        pairs,
+        vec![
+            ("BAD GUYS #1".to_string(), 6),
+            ("BAD GUYS #2".to_string(), 28),
+            ("BAD GUYS #3".to_string(), 50),
+            ("SONIC THE HEDGEHOG #35".to_string(), 138),
+            ("SONIC THE HEDGEHOG #36".to_string(), 160),
+            ("SONIC THE HEDGEHOG #37".to_string(), 182),
+        ],
+        "each title takes the badge on its own side of the gutter, in page order"
+    );
+
+    // Series and number come from the heading so a mixed collection can split
+    // into more than one series.
+    assert_eq!(entries[0].series.as_deref(), Some("BAD GUYS"));
+    assert_eq!(entries[0].number, "1");
+    assert_eq!(entries[3].series.as_deref(), Some("SONIC THE HEDGEHOG"));
+    assert_eq!(entries[3].number, "35");
+}
+
+#[test]
+fn split_files_each_range_under_its_own_series() {
+    use comic_reader_lib::models::{SplitRange, SplitRequest};
+
+    let (dir, db) = setup("split-per-series");
+    let archive = dir.join("Sonic IDW Collection v04.cbz");
+    write_cbz(&archive, 12, false);
+    db.with(|conn| library::import_root(conn, &archive)).unwrap();
+    let file_id: String = db
+        .with(|conn| {
+            conn.query_row("SELECT id FROM library_files LIMIT 1", [], |row| row.get(0))
+                .map_err(Into::into)
+        })
+        .unwrap();
+
+    let request = SplitRequest {
+        file_id: file_id.clone(),
+        series_title: Some("Sonic IDW Collection v04".into()),
+        ranges: vec![
+            SplitRange {
+                title: "Bad Guys #1".into(),
+                series: Some("Sonic the Hedgehog: Bad Guys".into()),
+                number: "1".into(),
+                start_page: 0,
+                end_page: 4,
+            },
+            SplitRange {
+                title: "Sonic the Hedgehog #33".into(),
+                series: Some("Sonic the Hedgehog".into()),
+                number: "33".into(),
+                start_page: 4,
+                end_page: 12,
+            },
+        ],
+    };
+    let issues = db
+        .with(|conn| repo::apply_split(conn, &request))
+        .unwrap();
+    assert_eq!(issues.len(), 2);
+
+    let titles: Vec<String> = db
+        .with(|conn| {
+            let mut stmt = conn
+                .prepare("SELECT title FROM series ORDER BY title")
+                .map_err(comic_reader_lib::error::AppError::from)?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            Ok(rows.collect::<Result<Vec<_>, rusqlite::Error>>()?)
+        })
+        .unwrap();
+    // The import created a series from the file name; the split must add the
+    // two series the ranges name rather than filing everything under it.
+    assert!(titles.contains(&"Sonic the Hedgehog".to_string()));
+    assert!(titles.contains(&"Sonic the Hedgehog: Bad Guys".to_string()));
+
+    let issue_series: Vec<String> = db
+        .with(|conn| {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT s.title FROM issues i JOIN series s ON s.id = i.series_id
+                     WHERE i.file_id = ?1 ORDER BY i.number",
+                )
+                .map_err(comic_reader_lib::error::AppError::from)?;
+            let rows = stmt.query_map([&file_id], |row| row.get::<_, String>(0))?;
+            Ok(rows.collect::<Result<Vec<_>, rusqlite::Error>>()?)
+        })
+        .unwrap();
+    assert_eq!(
+        issue_series,
+        vec!["Sonic the Hedgehog: Bad Guys", "Sonic the Hedgehog"],
+        "each range files under its own series"
+    );
+
+    // Numbers come from the contents page, not from the row ordinal.
+    let numbers: Vec<String> = issues.iter().map(|issue| issue.number.clone()).collect();
+    assert!(numbers.contains(&"1".to_string()));
+    assert!(numbers.contains(&"33".to_string()));
+}
+
+#[test]
+fn provider_credits_are_proposed_then_accepted_with_identity() {
+    use comic_reader_lib::provider;
+    use serde_json::json;
+
+    let (dir, db) = setup("provider-accept");
+    let library_dir = dir.join("library");
+    std::fs::create_dir_all(&library_dir).unwrap();
+    write_cbz_with_characters(&library_dir.join("Sonic 001.cbz"), "Sonic", "1");
+    db.with(|conn| library::import_root(conn, &library_dir)).unwrap();
+    let series_id = series_id_for(&db, "Archie Sonic");
+
+    let credits = vec![
+        json!({ "id": 1558, "name": "Sonic the Hedgehog" }),
+        json!({ "id": 4001, "name": "Tails" }),
+    ];
+    let payload = json!({ "credits": credits });
+    let proposal = db
+        .with(|conn| {
+            provider::queue_proposal(
+                conn,
+                "chars",
+                "series",
+                &series_id,
+                &payload,
+                Some("https://comicvine.gamespot.com/volume/4050-1/"),
+            )
+        })
+        .unwrap();
+
+    let applied = db
+        .with(|conn| provider::accept_character_credits(conn, "series", &series_id, &credits))
+        .unwrap();
+    assert_eq!(applied, 2);
+
+    // Accepted credits join the roster and carry the provider identity, which is
+    // what a cross-series merge will key on later.
+    let characters = db
+        .with(|conn| comic_reader_lib::characters::series_characters(conn, &series_id))
+        .unwrap();
+    let names: Vec<&str> = characters.iter().map(|c| c.name.as_str()).collect();
+    assert!(names.contains(&"Sonic the Hedgehog"));
+    assert!(names.contains(&"Tails"));
+    assert!(names.contains(&"Sonic"), "existing roster must not be replaced");
+
+    let linked: Vec<(String, String)> = db
+        .with(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT name, provider_id FROM characters
+                 WHERE provider = 'comicvine' AND provider_id IS NOT NULL ORDER BY name",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            Ok(rows.collect::<Result<Vec<_>, rusqlite::Error>>()?)
+        })
+        .unwrap();
+    assert_eq!(linked.len(), 2);
+    assert!(linked.iter().any(|(name, id)| name == "Tails" && id == "4001"));
+
+    db.with(|conn| provider::decide(conn, &proposal, true)).unwrap();
+    let redecide = db.with(|conn| provider::decide(conn, &proposal, false));
+    assert!(redecide.is_err(), "a decided proposal cannot be decided again");
+}
+
+#[test]
+fn provider_cache_avoids_refetching_and_key_is_required() {
+    use comic_reader_lib::provider;
+
+    let (dir, db) = setup("provider-cache");
+    let library_dir = dir.join("library");
+    std::fs::create_dir_all(&library_dir).unwrap();
+    write_cbz_with_characters(&library_dir.join("Sonic 001.cbz"), "Sonic", "1");
+    db.with(|conn| library::import_root(conn, &library_dir)).unwrap();
+
+    // No key configured: resolution must fail loudly rather than silently.
+    let limiter = provider::RateLimiter::new();
+    let missing = db.with(|conn| provider::resolve_volume(conn, &limiter, "Sonic", None, None));
+    assert!(missing.is_err());
+
+    db.with(|conn| {
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES ('comicVineApiKey', 'test-key')",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    assert!(db.with(|conn| provider::api_key(conn)).is_ok());
+
+    // A cached response is served without a network call, which is what keeps a
+    // rescan offline and under the hourly budget.
+    db.with(|conn| {
+        conn.execute(
+            "INSERT INTO provider_cache
+                (id, provider, resource, external_id, body, fetched_at)
+             VALUES ('cached', 'comicvine', 'volume', '137248',
+                     '{\"results\":{\"id\":137248,\"name\":\"Sonic the Hedgehog: The IDW Collection\"}}',
+                     '2026-01-01T00:00:00Z')",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let volume = db
+        .with(|conn| provider::volume(conn, &limiter, 137248))
+        .unwrap();
+    assert_eq!(volume.id, 137248);
+    assert_eq!(volume.name, "Sonic the Hedgehog: The IDW Collection");
+
+    let cached: i64 = db
+        .with(|conn| {
+            conn.query_row("SELECT count(*) FROM provider_cache", [], |row| row.get(0))
+                .map_err(Into::into)
+        })
+        .unwrap();
+    assert_eq!(cached, 1, "serving from cache must not insert a second row");
+}
+
+#[test]
+fn provider_descriptor_is_plain_text_and_attributed() {
+    use comic_reader_lib::provider;
+
+    let (dir, db) = setup("provider-descriptor");
+    let library_dir = dir.join("library");
+    std::fs::create_dir_all(&library_dir).unwrap();
+    write_cbz_with_characters(&library_dir.join("Sonic 001.cbz"), "Sonic", "1");
+    db.with(|conn| library::import_root(conn, &library_dir)).unwrap();
+
+    db.with(|conn| {
+        conn.execute(
+            "INSERT INTO provider_cache
+                (id, provider, resource, external_id, body, fetched_at)
+             VALUES ('v', 'comicvine', 'volume', '109575', ?1, '2026-01-01T00:00:00Z')",
+            [r#"{"results":{"id":109575,"name":"Sonic the Hedgehog","start_year":"2018",
+                "count_of_issues":91,
+                "publisher":{"name":"IDW Publishing"},
+                "description":"<p>A <b>faster</b> hedgehog &amp; friends.</p><p>Second para.</p>"}}"#],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    let limiter = provider::RateLimiter::new();
+    let (text, url) = db
+        .with(|conn| provider::series_descriptor(conn, &limiter, 109575))
+        .unwrap();
+    assert!(text.contains("IDW Publishing"));
+    assert!(text.contains("2018"));
+    assert!(text.contains("91"));
+    assert!(text.contains("faster"), "blurb text survives");
+    assert!(!text.contains('<'), "provider markup must never reach the UI");
+    assert!(text.contains("& friends"), "entities are decoded");
+    assert_eq!(url, "https://comicvine.gamespot.com/volume/4050-109575/");
+}
+
+#[test]
+fn provider_rate_limiter_refuses_past_the_hourly_budget() {
+    use comic_reader_lib::provider;
+
+    // The limiter is what stands in for the quota headers ComicVine does not
+    // send; refusing locally beats being throttled mid-import.
+    let limiter = provider::RateLimiter::new();
+    for _ in 0..200 {
+        limiter.check_for_test("issue").unwrap();
+    }
+    assert!(limiter.check_for_test("issue").is_err());
+    // The budget is per resource, not global.
+    assert!(limiter.check_for_test("volume").is_ok());
 }

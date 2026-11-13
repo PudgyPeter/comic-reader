@@ -186,11 +186,14 @@ export interface MatchFilePatch {
 
 export interface TocEntry {
   title: string;
+  series?: string;
+  number?: string;
   printedPage: number;
 }
 
 export interface SplitEntry {
   title: string;
+  series?: string;
   number: string;
   printedPage: number;
   startPage: number;
@@ -207,6 +210,7 @@ export interface SplitProposal {
 
 export interface SplitRange {
   title: string;
+  series?: string;
   number: string;
   startPage: number;
   endPage: number;
@@ -569,6 +573,38 @@ export interface RelationshipInput {
 export interface RelationshipPatch {
   status?: "active" | "former" | "unknown" | "secret";
   description?: string | null;
+}
+
+export interface ProviderStatus {
+  keySet: boolean;
+  pendingProposals: number;
+  cachedResponses: number;
+}
+
+export interface ProviderLookup {
+  externalId: string;
+  name: string;
+  publisher: string | null;
+  startYear: string | null;
+  issueCount: number | null;
+  descriptor: string;
+  sourceUrl: string;
+}
+
+export interface ProviderProposal {
+  id: string;
+  matchedIssues: number;
+  localIssues: number;
+  credits: { id: number; name: string }[];
+}
+
+export interface ProviderProposalRow {
+  id: string;
+  entity: "series" | "issue";
+  localId: string;
+  credits: { id: number; name: string }[];
+  sourceUrl: string | null;
+  createdAt: string;
 }
 
 export interface UniverseSummary {

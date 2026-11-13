@@ -28,6 +28,10 @@ import type {
   RelationshipType,
   UniverseDetail,
   UniverseSummary,
+  ProviderLookup,
+  ProviderProposal,
+  ProviderProposalRow,
+  ProviderStatus,
   TocEntry,
   LibraryRoot,
   LibrarySnapshot,
@@ -233,6 +237,15 @@ export const api = {
     command<void>("update_relationship", { relationshipId, patch }),
   deleteRelationship: (relationshipId: string) =>
     command<void>("delete_relationship", { relationshipId }),
+  providerStatus: () => command<ProviderStatus>("provider_status"),
+  setProviderKey: (key: string) => command<void>("set_provider_key", { key }),
+  lookupSeriesProvider: (seriesId: string) =>
+    command<ProviderLookup>("lookup_series_provider", { seriesId }),
+  proposeSeriesCharacters: (seriesId: string) =>
+    command<ProviderProposal>("propose_series_characters", { seriesId }),
+  providerProposals: () => command<ProviderProposalRow[]>("provider_proposals"),
+  decideProviderProposal: (proposalId: string, accept: boolean) =>
+    command<number>("decide_provider_proposal", { proposalId, accept }),
   universes: () => command<UniverseSummary[]>("universes"),
   universeDetail: (name: string) => command<UniverseDetail>("universe_detail", { name }),
   splitAvailable: () => command<boolean>("split_available"),

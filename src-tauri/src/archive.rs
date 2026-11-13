@@ -116,16 +116,23 @@ pub fn scan_archive(path: &std::path::Path) -> AppResult<Vec<PageMeta>> {
     let file = std::fs::File::open(path)?;
     let reader = std::io::BufReader::new(file);
     let mut archive = zip::ZipArchive::new(reader)?;
+
+    // Enumerate from the central directory only. `by_index` reads the local
+    // header of each member and fails the whole scan when one is damaged, which
+    // is common in large collected editions: a single corrupt page must not make
+    // a 300-page book unopenable. `by_index_data` touches no member data.
     let mut names = Vec::new();
     for index in 0..archive.len() {
-        let entry = archive.by_index(index)?;
+        let Ok(entry) = archive.by_index_data(index) else {
+            continue;
+        };
         if entry.is_dir() {
             continue;
         }
-        let Some(enclosed) = entry.enclosed_name() else {
+        let Ok(name) = entry.name() else {
             continue;
         };
-        let name = enclosed.to_string_lossy().to_string();
+        let name = name.to_string();
         if name.starts_with("__MACOSX/") {
             continue;
         }
@@ -145,12 +152,19 @@ pub fn scan_archive(path: &std::path::Path) -> AppResult<Vec<PageMeta>> {
 
     let mut out = Vec::with_capacity(names.len());
     for (name, index) in names {
-        let mut entry = archive.by_index(index)?;
-        let (width, height) = probe_dimensions(&mut entry, DIMENSION_PROBE_BYTES).unwrap_or((0, 0));
+        // A page that cannot be read still takes its slot, with unknown
+        // dimensions. Keeping the index stable matters: issue `page_offset`
+        // values and split ranges are positions in this list, so dropping a
+        // corrupt page would silently shift every later page.
+        let size = archive
+            .by_index(index)
+            .ok()
+            .and_then(|mut entry| probe_dimensions(&mut entry, DIMENSION_PROBE_BYTES))
+            .unwrap_or((0, 0));
         out.push(PageMeta {
             name,
-            width,
-            height,
+            width: size.0,
+            height: size.1,
         });
     }
     if out.is_empty() {

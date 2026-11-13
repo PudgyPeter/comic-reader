@@ -75,7 +75,12 @@ function SplitForm({
     try {
       const updated = await api.recombineSplit(
         file.id,
-        entries.map((entry) => ({ title: entry.title, printedPage: entry.printedPage })),
+        entries.map((entry) => ({
+          title: entry.title,
+          series: entry.series,
+          number: entry.number,
+          printedPage: entry.printedPage,
+        })),
         next,
       );
       setRows(updated.entries);
@@ -98,6 +103,7 @@ function SplitForm({
     try {
       const ranges: SplitRange[] = entries.map((entry, index) => ({
         title: entry.title,
+        series: entry.series,
         number: entry.number || String(index + 1),
         startPage: entry.startPage,
         endPage: entry.endPage,

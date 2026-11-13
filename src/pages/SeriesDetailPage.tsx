@@ -7,6 +7,7 @@ import { Icon } from "../components/Icon";
 import { cx, formatDate, pluralize, progressRatio } from "../lib/utils";
 import { AddToCollectionMenu } from "../components/AddToCollection";
 import { CharactersPanel } from "../components/Characters";
+import { ProviderSeriesPanel } from "../components/Provider";
 import { useToast } from "../components/Toast";
 import type { IssueCard as SeriesDetailIssue } from "../lib/types";
 
@@ -381,6 +382,15 @@ export default function SeriesDetailPage() {
         characters={characters.data ?? []}
         loading={characters.isLoading}
       />
+
+      <section className="mt-6 rounded-xl border border-[var(--line)] bg-[var(--surface-1)] p-4">
+        <ProviderSeriesPanel
+          seriesId={seriesId}
+          onApplied={async () => {
+            await queryClient.invalidateQueries({ queryKey: ["characters", seriesId] });
+          }}
+        />
+      </section>
 
       <h2 className="mt-8 mb-3 font-display text-sm font-semibold tracking-tight text-[var(--text)]">
         Issues

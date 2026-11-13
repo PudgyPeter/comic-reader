@@ -1,10 +1,10 @@
 //! Optional, user-initiated web lookup for character summaries.
 //!
-//! This is the *only* outbound network path in the app, and it exists for one
-//! narrow case: the comics in a series do not carry enough text to describe a
-//! character, so the user asks for a public summary instead. Nothing here runs
-//! during import, scan, search or reading — the reader must stay fully usable
-//! with the network disabled (`ARCHITECTURE.md` §14.3).
+//! This and `provider.rs` are the app's only outbound network paths. This one
+//! exists for a narrow case: the comics in a series do not carry enough text to
+//! describe a character, so the user asks for a public summary instead. Nothing
+//! here runs during import, scan, search or reading — the reader must stay fully
+//! usable with the network disabled (`ARCHITECTURE.md` §14.3).
 //!
 //! Wikipedia's REST/API endpoints are the only allowlisted hosts. Responses are
 //! bounded in size and time, and the text is stored as plain text so provider
